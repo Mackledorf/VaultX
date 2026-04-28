@@ -51,6 +51,20 @@ export async function uploadEntries(files: File[], userId: string): Promise<void
   }
 }
 
+export async function updateEntryKeywords(entryId: string, keywords: string[]): Promise<string[]> {
+  const nextKeywords = normalizeKeywords(keywords);
+  const { error } = await supabase
+    .from('vault_entries')
+    .update({ keywords: nextKeywords })
+    .eq('id', entryId);
+
+  if (error) {
+    throw error;
+  }
+
+  return nextKeywords;
+}
+
 async function attachUrls(entries: VaultEntry[]): Promise<DisplayEntry[]> {
   if (!entries.length) {
     return [];
@@ -74,9 +88,13 @@ async function attachUrls(entries: VaultEntry[]): Promise<DisplayEntry[]> {
 }
 
 function keywordsFromName(name: string): string[] {
-  return name
+  return normalizeKeywords(name
     .replace(/\.[^.]+$/, '')
-    .split(/[^a-zA-Z0-9]+/)
-    .map((part) => part.toLowerCase())
-    .filter(Boolean);
+    .split(/[^a-zA-Z0-9]+/));
+}
+
+function normalizeKeywords(keywords: string[]): string[] {
+  return Array.from(new Set(keywords
+    .map((keyword) => keyword.trim().toLowerCase())
+    .filter(Boolean)));
 }

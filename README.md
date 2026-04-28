@@ -1,6 +1,6 @@
 # VaultX
 
-Private interface for a locked collection.
+Private Vault.
 
 ## Run
 

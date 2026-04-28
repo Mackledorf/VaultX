@@ -1,8 +1,8 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { Compass, LogOut, Search, UploadCloud } from 'lucide-react';
+import { Compass, LogOut, Search, UploadCloud, X } from 'lucide-react';
 import type { Session, User } from '@supabase/supabase-js';
 import { MediaTile } from './components/MediaTile';
-import { listEntries, uploadEntries } from './lib/entries';
+import { listEntries, updateEntryKeywords, uploadEntries } from './lib/entries';
 import { hasSupabaseConfig, supabase } from './lib/supabase';
 import type { DisplayEntry } from './types';
 
@@ -90,6 +90,7 @@ function AccessGate() {
 
 function VaultShell({ view, setView, user }: { view: View; setView: (view: View) => void; user: User }) {
   const [entries, setEntries] = useState<DisplayEntry[]>([]);
+  const [selectedEntry, setSelectedEntry] = useState<DisplayEntry | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -110,6 +111,16 @@ function VaultShell({ view, setView, user }: { view: View; setView: (view: View)
     void refreshEntries();
   }, []);
 
+  async function saveEntryKeywords(entryId: string, keywords: string[]) {
+    const nextKeywords = await updateEntryKeywords(entryId, keywords);
+    setEntries((currentEntries) => currentEntries.map((entry) => (
+      entry.id === entryId ? { ...entry, keywords: nextKeywords } : entry
+    )));
+    setSelectedEntry((currentEntry) => (
+      currentEntry?.id === entryId ? { ...currentEntry, keywords: nextKeywords } : currentEntry
+    ));
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -122,9 +133,13 @@ function VaultShell({ view, setView, user }: { view: View; setView: (view: View)
       {error && <p className="status error">{error}</p>}
       {loading && <p className="status">Loading</p>}
 
-      {!loading && view === 'search' && <SearchView entries={entries} />}
-      {!loading && view === 'explore' && <ExploreView entries={entries} />}
+      {!loading && view === 'search' && <SearchView entries={entries} onSelectEntry={setSelectedEntry} />}
+      {!loading && view === 'explore' && <ExploreView entries={entries} onSelectEntry={setSelectedEntry} />}
       {!loading && view === 'upload' && <UploadView userId={user.id} onUploaded={refreshEntries} />}
+
+      {selectedEntry && (
+        <TagEditor entry={selectedEntry} onClose={() => setSelectedEntry(null)} onSave={saveEntryKeywords} />
+      )}
 
       <nav className="bottom-nav" aria-label="Views">
         <Tab active={view === 'search'} icon={<Search size={20} />} label="Search" onClick={() => setView('search')} />
@@ -144,7 +159,7 @@ function Tab({ active, icon, label, onClick }: { active: boolean; icon: JSX.Elem
   );
 }
 
-function SearchView({ entries }: { entries: DisplayEntry[] }) {
+function SearchView({ entries, onSelectEntry }: { entries: DisplayEntry[]; onSelectEntry: (entry: DisplayEntry) => void }) {
   const [query, setQuery] = useState('');
   const normalizedQuery = query.trim().toLowerCase();
   const filtered = useMemo(() => {
@@ -166,26 +181,96 @@ function SearchView({ entries }: { entries: DisplayEntry[] }) {
       </div>
       <div className="grid" aria-live="polite">
         {filtered.map((entry) => (
-          <MediaTile key={entry.id} entry={entry} />
+          <MediaTile key={entry.id} entry={entry} onSelect={onSelectEntry} />
         ))}
       </div>
-      {!filtered.length && <p className="status">Empty</p>}
+      {!filtered.length && <p className="status">{entries.length ? 'No results' : 'No media yet'}</p>}
     </section>
   );
 }
 
-function ExploreView({ entries }: { entries: DisplayEntry[] }) {
+function ExploreView({ entries, onSelectEntry }: { entries: DisplayEntry[]; onSelectEntry: (entry: DisplayEntry) => void }) {
   const shuffled = useMemo(() => [...entries].sort(() => Math.random() - 0.5), [entries]);
 
   return (
     <section className="explore-view" aria-live="polite">
       {shuffled.map((entry) => (
         <article className="stage" key={entry.id}>
-          <MediaTile entry={entry} mode="stage" />
+          <MediaTile entry={entry} mode="stage" onSelect={onSelectEntry} />
         </article>
       ))}
-      {!shuffled.length && <p className="status">Empty</p>}
+      {!shuffled.length && <p className="status">No media yet</p>}
     </section>
+  );
+}
+
+function TagEditor({ entry, onClose, onSave }: { entry: DisplayEntry; onClose: () => void; onSave: (entryId: string, keywords: string[]) => Promise<void> }) {
+  const [tagText, setTagText] = useState((entry.keywords || []).join(', '));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const tags = useMemo(() => parseTags(tagText), [tagText]);
+
+  useEffect(() => {
+    setTagText((entry.keywords || []).join(', '));
+    setError('');
+  }, [entry]);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setError('');
+
+    try {
+      await onSave(entry.id, tags);
+      onClose();
+    } catch {
+      setError('Unable to save tags');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function removeTag(tagToRemove: string) {
+    setTagText(tags.filter((tag) => tag !== tagToRemove).join(', '));
+  }
+
+  return (
+    <div className="sheet-backdrop" role="presentation" onClick={onClose}>
+      <form className="tag-sheet" onSubmit={submit} role="dialog" aria-modal="true" aria-labelledby="tag-sheet-title" onClick={(event) => event.stopPropagation()}>
+        <div className="sheet-header">
+          <div>
+            <p className="eyebrow">Tags</p>
+            <h2 id="tag-sheet-title">Edit media tags</h2>
+          </div>
+          <button className="icon-button" type="button" aria-label="Close" title="Close" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="tag-preview">
+          <MediaTile entry={entry} mode="stage" />
+        </div>
+
+        <label>
+          <span>Tags</span>
+          <input value={tagText} onChange={(event) => setTagText(event.target.value)} placeholder="favorites, trip, night" autoFocus />
+        </label>
+
+        {!!tags.length && (
+          <div className="tag-list" aria-label="Current tags">
+            {tags.map((tag) => (
+              <button className="tag-pill" type="button" key={tag} onClick={() => removeTag(tag)}>
+                <span>{tag}</span>
+                <X size={14} />
+              </button>
+            ))}
+          </div>
+        )}
+
+        {error && <p className="error">{error}</p>}
+        <button className="primary" type="submit" disabled={saving}>{saving ? 'Saving' : 'Save tags'}</button>
+      </form>
+    </div>
   );
 }
 
@@ -230,7 +315,7 @@ function UploadView({ userId, onUploaded }: { userId: string; onUploaded: () => 
         }}
       >
         <UploadCloud size={34} />
-        <span>Drop or select</span>
+        <span>Select media</span>
         <input
           type="file"
           multiple
@@ -257,4 +342,11 @@ function UploadView({ userId, onUploaded }: { userId: string; onUploaded: () => 
 
 function isSupportedFile(file: File) {
   return file.type.startsWith('image/') || file.type.startsWith('video/');
+}
+
+function parseTags(value: string): string[] {
+  return Array.from(new Set(value
+    .split(/[,#\n]+/)
+    .map((tag) => tag.trim().toLowerCase())
+    .filter(Boolean)));
 }
