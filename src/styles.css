@@ -479,29 +479,32 @@ video.media-grid {
 
 .upload-view {
   display: grid;
-  gap: 16px;
+  gap: 20px;
+}
+
+.upload-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
 }
 
 .dropzone {
   position: relative;
   display: grid;
-  min-height: 220px;
+  min-height: 140px;
   place-items: center;
-  gap: 10px;
+  gap: 6px;
   border: 1px solid var(--line);
   border-radius: var(--radius-lg);
   color: var(--text-muted);
   background: var(--surface);
+  padding: 16px;
+  text-align: center;
   box-shadow: var(--shadow-soft);
 }
 
-.dropzone svg {
-  color: var(--accent);
-}
-
 .dropzone span {
-  color: var(--text);
-  font-weight: 720;
+  font-size: 13px;
 }
 
 .dropzone.dragging {

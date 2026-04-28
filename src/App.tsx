@@ -1,5 +1,5 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
-import { Compass, LogOut, Search, UploadCloud, X } from 'lucide-react';
+import { Compass, Folder, LogOut, Search, UploadCloud, X } from 'lucide-react';
 import type { Session, User } from '@supabase/supabase-js';
 import { MediaTile } from './components/MediaTile';
 import { listEntries, updateEntryKeywords, uploadEntries } from './lib/entries';
@@ -299,30 +299,50 @@ function UploadView({ userId, onUploaded }: { userId: string; onUploaded: () => 
     }
   }
 
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    setSelectedFiles(Array.from(event.target.files || []).filter(isSupportedFile));
+  };
+
   return (
     <section className="view upload-view">
-      <label
-        className={dragging ? 'dropzone dragging' : 'dropzone'}
-        onDragOver={(event) => {
-          event.preventDefault();
-          setDragging(true);
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={(event) => {
-          event.preventDefault();
-          setDragging(false);
-          setSelectedFiles(Array.from(event.dataTransfer.files).filter(isSupportedFile));
-        }}
-      >
-        <UploadCloud size={34} />
-        <span>Select media</span>
-        <input
-          type="file"
-          multiple
-          accept="image/*,video/*"
-          onChange={(event) => setSelectedFiles(Array.from(event.target.files || []).filter(isSupportedFile))}
-        />
-      </label>
+      <div className="upload-controls">
+        <label
+          className={dragging ? 'dropzone dragging' : 'dropzone'}
+          onDragOver={(event) => {
+            event.preventDefault();
+            setDragging(true);
+          }}
+          onDragLeave={() => setDragging(false)}
+          onDrop={(event) => {
+            event.preventDefault();
+            setDragging(false);
+            setSelectedFiles(Array.from(event.dataTransfer.files).filter(isSupportedFile));
+          }}
+        >
+          <UploadCloud size={34} />
+          <span>Files</span>
+          <input
+            type="file"
+            multiple
+            accept="image/*,video/*"
+            onChange={handleFileChange}
+          />
+        </label>
+
+        <label className="dropzone">
+          <Folder size={34} />
+          <span>Folder</span>
+          <input
+            type="file"
+            multiple
+            // @ts-ignore
+            webkitdirectory=""
+            // @ts-ignore
+            directory=""
+            onChange={handleFileChange}
+          />
+        </label>
+      </div>
 
       {!!selectedFiles.length && (
         <div className="upload-list">
@@ -334,7 +354,7 @@ function UploadView({ userId, onUploaded }: { userId: string; onUploaded: () => 
 
       {error && <p className="status error">{error}</p>}
       <button className="primary" type="button" onClick={submit} disabled={!selectedFiles.length || loading}>
-        {loading ? 'Uploading' : 'Upload'}
+        {loading ? `Upload ${selectedFiles.length} item${selectedFiles.length === 1 ? '' : 's'}` : 'Start upload'}
       </button>
     </section>
   );

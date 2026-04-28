@@ -24,6 +24,12 @@ export async function uploadEntries(files: File[], userId: string): Promise<void
     const objectPath = `${userId}/${id}.${extension}`;
     const objectKind = file.type.startsWith('video/') ? 'video' : 'image';
 
+    // Get folder name if uploaded as part of a directory
+    // webkitRelativePath is usually "folderName/fileName.ext"
+    const relativePath = (file as any).webkitRelativePath || '';
+    const folderName = relativePath.split('/')[0];
+    const initialKeywords = folderName && folderName !== file.name ? [folderName] : [];
+
     const uploadResult = await supabase.storage.from(BUCKET).upload(objectPath, file, {
       cacheControl: '3600',
       contentType: file.type,
@@ -41,7 +47,7 @@ export async function uploadEntries(files: File[], userId: string): Promise<void
       display_name: file.name,
       content_type: file.type,
       object_kind: objectKind,
-      keywords: keywordsFromName(file.name),
+      keywords: normalizeKeywords(initialKeywords),
     });
 
     if (insertResult.error) {
@@ -85,12 +91,6 @@ async function attachUrls(entries: VaultEntry[]): Promise<DisplayEntry[]> {
       signedUrl: urlsByPath.get(entry.object_path) || '',
     }))
     .filter((entry) => entry.signedUrl);
-}
-
-function keywordsFromName(name: string): string[] {
-  return normalizeKeywords(name
-    .replace(/\.[^.]+$/, '')
-    .split(/[^a-zA-Z0-9]+/));
 }
 
 function normalizeKeywords(keywords: string[]): string[] {
