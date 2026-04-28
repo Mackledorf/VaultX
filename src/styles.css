@@ -18,6 +18,10 @@ body {
   background: #090909;
 }
 
+#root {
+  min-height: 100vh;
+}
+
 button,
 input {
   font: inherit;
@@ -29,8 +33,12 @@ button {
 
 .gate {
   display: grid;
+  width: min(100%, 430px);
   min-height: 100vh;
+  min-height: 100dvh;
+  margin: 0 auto;
   place-items: center;
+  border-inline: 1px solid #1c1c1c;
   padding: 24px;
 }
 
@@ -116,8 +124,13 @@ input:focus {
 }
 
 .app-shell {
+  position: relative;
+  width: min(100%, 430px);
   min-height: 100vh;
+  min-height: 100dvh;
+  margin: 0 auto;
   background: #090909;
+  border-inline: 1px solid #1c1c1c;
 }
 
 .topbar {
@@ -125,11 +138,11 @@ input:focus {
   top: 0;
   z-index: 20;
   display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 12px;
+  grid-template-columns: 1fr auto;
+  gap: 10px;
   align-items: center;
-  min-height: 64px;
-  padding: 10px clamp(12px, 3vw, 28px);
+  min-height: 58px;
+  padding: 8px 14px;
   border-bottom: 1px solid #242424;
   background: rgba(9, 9, 9, 0.94);
   backdrop-filter: blur(18px);
@@ -137,15 +150,26 @@ input:focus {
 
 .brand {
   height: 42px;
+  justify-self: start;
   border-radius: 6px;
   padding: 0 14px;
   font-weight: 800;
 }
 
-.tabs {
-  display: flex;
-  justify-content: center;
+.bottom-nav {
+  position: fixed;
+  left: 50%;
+  bottom: 0;
+  z-index: 30;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
   gap: 8px;
+  width: min(100%, 430px);
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  border-top: 1px solid #242424;
+  background: rgba(9, 9, 9, 0.96);
+  transform: translateX(-50%);
+  backdrop-filter: blur(18px);
 }
 
 .tab,
@@ -158,8 +182,12 @@ input:focus {
 }
 
 .tab {
-  gap: 8px;
-  padding: 0 12px;
+  display: grid;
+  gap: 4px;
+  height: 58px;
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .tab.active {
@@ -173,14 +201,14 @@ input:focus {
 }
 
 .view {
-  width: min(100%, 980px);
+  width: 100%;
   margin: 0 auto;
-  padding: 20px clamp(12px, 3vw, 28px) 56px;
+  padding: 16px 12px 96px;
 }
 
 .searchbar {
   position: sticky;
-  top: 76px;
+  top: 70px;
   z-index: 10;
   display: flex;
   align-items: center;
@@ -202,7 +230,7 @@ input:focus {
 
 .grid {
   column-count: 2;
-  column-gap: 12px;
+  column-gap: 10px;
 }
 
 .media {
@@ -213,8 +241,8 @@ input:focus {
 
 .media-grid {
   break-inside: avoid;
-  margin: 0 0 12px;
-  border-radius: 8px;
+  margin: 0 0 10px;
+  border-radius: 6px;
   border: 1px solid #1f1f1f;
 }
 
@@ -224,22 +252,23 @@ video.media-grid {
 }
 
 .explore-view {
-  height: calc(100vh - 64px);
+  height: calc(100vh - 58px - 79px);
   overflow-y: auto;
   scroll-snap-type: y mandatory;
+  padding-bottom: calc(79px + env(safe-area-inset-bottom));
 }
 
 .stage {
   display: grid;
-  height: calc(100vh - 64px);
+  height: calc(100vh - 58px - 79px);
   place-items: center;
   scroll-snap-align: start;
   padding: 12px;
 }
 
 .media-stage {
-  width: min(100%, 760px);
-  max-height: calc(100vh - 96px);
+  width: 100%;
+  max-height: calc(100vh - 58px - 103px);
   object-fit: contain;
   border-radius: 8px;
 }
@@ -294,26 +323,9 @@ video.media-grid {
 }
 
 @media (max-width: 620px) {
-  .topbar {
-    grid-template-columns: 1fr auto;
-  }
-
-  .brand {
-    display: none;
-  }
-
-  .tabs {
-    justify-content: start;
-    overflow-x: auto;
-  }
-
-  .tab span {
-    display: none;
-  }
-
-  .tab {
-    width: 42px;
-    padding: 0;
+  .gate,
+  .app-shell {
+    border-inline: 0;
   }
 
   .grid {

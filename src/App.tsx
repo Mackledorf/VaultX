@@ -71,13 +71,14 @@ function AccessGate() {
     <main className="gate">
       <form className="gate-panel" onSubmit={submit}>
         <p className="eyebrow">VaultX</p>
-        <h1>Locked</h1>
+        <h1>This site is locked</h1>
+        <p className="muted">Please enter your access credentials to continue.</p>
         <label>
           <span>Access ID</span>
           <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" autoComplete="username" required />
         </label>
         <label>
-          <span>Key</span>
+          <span>Password</span>
           <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" required />
         </label>
         {error && <p className="error">{error}</p>}
@@ -113,11 +114,6 @@ function VaultShell({ view, setView, user }: { view: View; setView: (view: View)
     <main className="app-shell">
       <header className="topbar">
         <button className="brand" onClick={() => setView('search')}>VaultX</button>
-        <nav className="tabs" aria-label="Views">
-          <Tab active={view === 'search'} icon={<Search size={18} />} label="Search" onClick={() => setView('search')} />
-          <Tab active={view === 'explore'} icon={<Compass size={18} />} label="Explore" onClick={() => setView('explore')} />
-          <Tab active={view === 'upload'} icon={<UploadCloud size={18} />} label="Upload" onClick={() => setView('upload')} />
-        </nav>
         <button className="icon-button" aria-label="Sign out" title="Sign out" onClick={() => supabase.auth.signOut()}>
           <LogOut size={18} />
         </button>
@@ -129,6 +125,12 @@ function VaultShell({ view, setView, user }: { view: View; setView: (view: View)
       {!loading && view === 'search' && <SearchView entries={entries} />}
       {!loading && view === 'explore' && <ExploreView entries={entries} />}
       {!loading && view === 'upload' && <UploadView userId={user.id} onUploaded={refreshEntries} />}
+
+      <nav className="bottom-nav" aria-label="Views">
+        <Tab active={view === 'search'} icon={<Search size={20} />} label="Search" onClick={() => setView('search')} />
+        <Tab active={view === 'explore'} icon={<Compass size={20} />} label="Explore" onClick={() => setView('explore')} />
+        <Tab active={view === 'upload'} icon={<UploadCloud size={20} />} label="Upload" onClick={() => setView('upload')} />
+      </nav>
     </main>
   );
 }
