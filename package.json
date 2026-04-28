@@ -2,6 +2,7 @@
   "name": "vaultx",
   "private": true,
   "version": "0.1.0",
+  "homepage": ".",
   "type": "module",
   "scripts": {
     "dev": "vite",
