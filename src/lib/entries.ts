@@ -1,100 +1,162 @@
-import { supabase } from './supabase';
-import type { DisplayEntry, VaultEntry } from '../types';
+import type { DisplayEntry, UploadBatch, VaultCollection, VaultEntry } from '../types';
 
-const BUCKET = 'vaultx';
-const URL_TTL_SECONDS = 60 * 30;
+type UploadCallbacks = {
+  onBatch?: (batch: UploadBatch) => void;
+  onFileProgress?: (index: number, progress: number) => void;
+  onFileStatus?: (index: number, status: string, error?: string) => void;
+};
 
-export async function listEntries(): Promise<DisplayEntry[]> {
-  const { data, error } = await supabase
-    .from('vault_entries')
-    .select('*')
-    .order('created_at', { ascending: false });
-
-  if (error) {
-    throw error;
-  }
-
-  return attachUrls((data || []) as VaultEntry[]);
+export async function getConfig(): Promise<{ configured: boolean; storageProvider: string; maxFileSizeBytes: number }> {
+  return request('/api/config');
 }
 
-export async function uploadEntries(files: File[], userId: string): Promise<void> {
-  for (const file of files) {
-    const id = crypto.randomUUID();
-    const extension = file.name.split('.').pop()?.toLowerCase() || 'bin';
-    const objectPath = `${userId}/${id}.${extension}`;
-    const objectKind = file.type.startsWith('video/') ? 'video' : 'image';
+export async function getSession(): Promise<{ authenticated: boolean; configured: boolean }> {
+  return request('/api/session');
+}
 
-    // Get folder name if uploaded as part of a directory
-    // webkitRelativePath is usually "folderName/fileName.ext"
-    const relativePath = (file as any).webkitRelativePath || '';
-    const folderName = relativePath.split('/')[0];
-    const initialKeywords = folderName && folderName !== file.name ? [folderName] : [];
+export async function login(password: string): Promise<void> {
+  await request('/api/login', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  });
+}
 
-    const uploadResult = await supabase.storage.from(BUCKET).upload(objectPath, file, {
-      cacheControl: '3600',
-      contentType: file.type,
-      upsert: false,
-    });
+export async function logout(): Promise<void> {
+  await request('/api/logout', { method: 'POST' });
+}
 
-    if (uploadResult.error) {
-      throw uploadResult.error;
+export async function listEntries(collections: VaultCollection[] = []): Promise<DisplayEntry[]> {
+  const entries = await request<VaultEntry[]>('/api/entries');
+  const collectionsById = new Map(collections.map((collection) => [collection.id, collection]));
+
+  return entries.map((entry) => ({
+    ...entry,
+    collection: collectionsById.get(entry.collectionId),
+  }));
+}
+
+export async function listCollections(): Promise<VaultCollection[]> {
+  return request('/api/collections');
+}
+
+export async function createCollection(name: string): Promise<VaultCollection> {
+  return request('/api/collections', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+  });
+}
+
+export async function deleteEntry(entryId: string): Promise<void> {
+  await request(`/api/entries/${entryId}`, { method: 'DELETE' });
+}
+
+export async function uploadEntries(files: File[], collectionId: string, callbacks: UploadCallbacks = {}): Promise<UploadBatch> {
+  const batch = await request<UploadBatch>('/api/upload-batches', {
+    method: 'POST',
+    body: JSON.stringify({
+      collectionId,
+      files: files.map((file) => ({ name: file.name, size: file.size, type: file.type })),
+    }),
+  });
+  callbacks.onBatch?.(batch);
+
+  const acceptedFiles = batch.files.filter((file) => file.status !== 'skipped');
+  await runWithConcurrency(acceptedFiles, 2, async (batchFile) => {
+    const file = files[batchFile.index];
+
+    if (!file) {
+      return;
     }
 
-    const insertResult = await supabase.from('vault_entries').insert({
-      id,
-      owner_id: userId,
-      object_path: objectPath,
-      display_name: file.name,
-      content_type: file.type,
-      object_kind: objectKind,
-      keywords: normalizeKeywords(initialKeywords),
-    });
-
-    if (insertResult.error) {
-      await supabase.storage.from(BUCKET).remove([objectPath]);
-      throw insertResult.error;
+    try {
+      callbacks.onFileStatus?.(batchFile.index, 'uploading');
+      const nextBatch = await uploadBatchFile(batch.id, batchFile.index, file, callbacks.onFileProgress);
+      callbacks.onBatch?.(nextBatch);
+    } catch {
+      callbacks.onFileStatus?.(batchFile.index, 'failed', 'Upload failed');
     }
-  }
+  });
+
+  const finalBatch = await request<UploadBatch>(`/api/upload-batches/${batch.id}`);
+  callbacks.onBatch?.(finalBatch);
+
+  return finalBatch;
 }
 
-export async function updateEntryKeywords(entryId: string, keywords: string[]): Promise<string[]> {
-  const nextKeywords = normalizeKeywords(keywords);
-  const { error } = await supabase
-    .from('vault_entries')
-    .update({ keywords: nextKeywords })
-    .eq('id', entryId);
+async function uploadBatchFile(
+  batchId: string,
+  index: number,
+  file: File,
+  onProgress?: (index: number, progress: number) => void,
+): Promise<UploadBatch> {
+  const formData = new FormData();
+  formData.append('index', String(index));
+  formData.append('file', file);
 
-  if (error) {
-    throw error;
-  }
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open('POST', `/api/upload-batches/${batchId}/files`);
+    request.withCredentials = true;
 
-  return nextKeywords;
+    request.upload.onprogress = (event) => {
+      if (event.lengthComputable) {
+        onProgress?.(index, Math.round((event.loaded / event.total) * 100));
+      }
+    };
+
+    request.onload = () => {
+      if (request.status >= 200 && request.status < 300) {
+        const payload = JSON.parse(request.responseText) as { batch: UploadBatch };
+        resolve(payload.batch);
+      } else {
+        reject(new Error('Upload failed'));
+      }
+    };
+
+    request.onerror = () => reject(new Error('Upload failed'));
+    request.send(formData);
+  });
 }
 
-async function attachUrls(entries: VaultEntry[]): Promise<DisplayEntry[]> {
-  if (!entries.length) {
-    return [];
-  }
+async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (item: T) => Promise<void>) {
+  let index = 0;
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (index < items.length) {
+      const item = items[index];
+      index += 1;
+      await worker(item);
+    }
+  });
 
-  const paths = entries.map((entry) => entry.object_path);
-  const { data, error } = await supabase.storage.from(BUCKET).createSignedUrls(paths, URL_TTL_SECONDS);
-
-  if (error) {
-    throw error;
-  }
-
-  const urlsByPath = new Map((data || []).map((item) => [item.path, item.signedUrl]));
-
-  return entries
-    .map((entry) => ({
-      ...entry,
-      signedUrl: urlsByPath.get(entry.object_path) || '',
-    }))
-    .filter((entry) => entry.signedUrl);
+  await Promise.all(workers);
 }
 
-function normalizeKeywords(keywords: string[]): string[] {
-  return Array.from(new Set(keywords
-    .map((keyword) => keyword.trim().toLowerCase())
-    .filter(Boolean)));
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const response = await fetch(path, {
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      ...options.headers,
+    },
+    ...options,
+  });
+
+  if (!response.ok) {
+    throw new Error(await readError(response));
+  }
+
+  if (response.status === 204) {
+    return undefined as T;
+  }
+
+  return response.json() as Promise<T>;
+}
+
+async function readError(response: Response) {
+  try {
+    const payload = await response.json();
+    return payload.error || 'Request failed';
+  } catch {
+    return 'Request failed';
+  }
 }

@@ -5,13 +5,21 @@
   "homepage": ".",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "concurrently \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "node --watch server/index.js",
+    "dev:web": "vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "start": "node server/index.js",
+    "hash-password": "node server/scripts/hash-password.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.43.5",
+    "cookie-parser": "^1.4.6",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "googleapis": "^144.0.0",
     "lucide-react": "^0.468.0",
+    "multer": "^2.1.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
@@ -19,6 +27,7 @@
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^6.0.1",
+    "concurrently": "^9.1.0",
     "typescript": "^5.5.3",
     "vite": "^8.0.10"
   }

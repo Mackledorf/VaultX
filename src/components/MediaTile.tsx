@@ -30,12 +30,12 @@ export function MediaTile({ entry, mode = 'grid', onSelect }: MediaTileProps) {
       onKeyDown={onSelect ? handleKeyDown : undefined}
       role={onSelect ? 'button' : undefined}
       tabIndex={onSelect ? 0 : undefined}
-      aria-label={onSelect ? `Edit tags for ${entry.display_name}` : undefined}
+      aria-label={onSelect ? `Open ${entry.displayName}` : undefined}
     >
-      {entry.object_kind === 'video' ? (
+      {entry.objectKind === 'video' ? (
       <video
         className={mediaClassName}
-        src={entry.signedUrl}
+        src={entry.mediaUrl}
         autoPlay
         loop
         muted
@@ -44,7 +44,7 @@ export function MediaTile({ entry, mode = 'grid', onSelect }: MediaTileProps) {
         preload="metadata"
       />
       ) : (
-        <img className={mediaClassName} src={entry.signedUrl} alt="" loading="lazy" />
+        <img className={mediaClassName} src={entry.mediaUrl} alt="" loading="lazy" />
       )}
     </figure>
   );
