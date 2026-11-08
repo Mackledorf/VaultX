@@ -1,4 +1,4 @@
-import type { DisplayEntry, UploadBatch, VaultCollection, VaultEntry } from '../types';
+import type { DisplayEntry, MediaType, UploadBatch } from '../types';
 
 type UploadCallbacks = {
   onBatch?: (batch: UploadBatch) => void;
@@ -6,7 +6,7 @@ type UploadCallbacks = {
   onFileStatus?: (index: number, status: string, error?: string) => void;
 };
 
-export async function getConfig(): Promise<{ configured: boolean; storageProvider: string; maxFileSizeBytes: number }> {
+export async function getConfig(): Promise<{ configured: boolean; authDisabled: boolean; storageProvider: string; maxFileSizeBytes: number }> {
   return request('/api/config');
 }
 
@@ -25,44 +25,34 @@ export async function logout(): Promise<void> {
   await request('/api/logout', { method: 'POST' });
 }
 
-export async function listEntries(collections: VaultCollection[] = []): Promise<DisplayEntry[]> {
-  const entries = await request<VaultEntry[]>('/api/entries');
-  const collectionsById = new Map(collections.map((collection) => [collection.id, collection]));
-
-  return entries.map((entry) => ({
-    ...entry,
-    collection: collectionsById.get(entry.collectionId),
-  }));
-}
-
-export async function listCollections(): Promise<VaultCollection[]> {
-  return request('/api/collections');
-}
-
-export async function createCollection(name: string): Promise<VaultCollection> {
-  return request('/api/collections', {
-    method: 'POST',
-    body: JSON.stringify({ name }),
-  });
+export async function searchEntries(query: string, type: MediaType | 'all', offset = 0, limit = 60): Promise<{ items: DisplayEntry[]; total: number }> {
+  const params = new URLSearchParams({ q: query, type, offset: String(offset), limit: String(limit) });
+  return request(`/api/entries?${params}`);
 }
 
 export async function deleteEntry(entryId: string): Promise<void> {
   await request(`/api/entries/${entryId}`, { method: 'DELETE' });
 }
 
-export async function uploadEntries(files: File[], collectionId: string, callbacks: UploadCallbacks = {}): Promise<UploadBatch> {
+export async function updateEntryTags(entryId: string, tags: string[]): Promise<DisplayEntry> {
+  return request(`/api/entries/${entryId}/tags`, {
+    method: 'PATCH',
+    body: JSON.stringify({ tags }),
+  });
+}
+
+export async function uploadEntries(items: Array<{ file: File; tags: string[] }>, callbacks: UploadCallbacks = {}): Promise<UploadBatch> {
   const batch = await request<UploadBatch>('/api/upload-batches', {
     method: 'POST',
     body: JSON.stringify({
-      collectionId,
-      files: files.map((file) => ({ name: file.name, size: file.size, type: file.type })),
+      files: items.map(({ file, tags }) => ({ size: file.size, tags })),
     }),
   });
   callbacks.onBatch?.(batch);
 
   const acceptedFiles = batch.files.filter((file) => file.status !== 'skipped');
   await runWithConcurrency(acceptedFiles, 2, async (batchFile) => {
-    const file = files[batchFile.index];
+    const file = items[batchFile.index]?.file;
 
     if (!file) {
       return;
@@ -91,7 +81,7 @@ async function uploadBatchFile(
 ): Promise<UploadBatch> {
   const formData = new FormData();
   formData.append('index', String(index));
-  formData.append('file', file);
+  formData.append('file', file, 'upload');
 
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();

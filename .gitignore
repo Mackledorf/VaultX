@@ -3,6 +3,15 @@ dist
 .env
 .env.local
 .vaultx-data
+vaultx-data/
+vaultx.sqlite
+vaultx.sqlite-shm
+vaultx.sqlite-wal
+vaultx.sqlite-*
+vaultx-manifest.json
+/media/
+/previews/
+/.staging/
 *.credentials.json
 .DS_Store
 tsconfig*.tsbuildinfo

@@ -1,12 +1,11 @@
-import { createGoogleDriveStorageAdapter } from './google-drive.js';
 import { createLocalStorageAdapter } from './local.js';
 
 export function createStorageAdapter() {
-  const provider = process.env.VAULT_STORAGE_PROVIDER || 'google-drive';
+  const provider = process.env.VAULT_STORAGE_PROVIDER || 'local';
 
-  if (provider === 'local') {
-    return createLocalStorageAdapter();
+  if (provider !== 'local') {
+    throw new Error('VaultX supports private local storage only. Set VAULT_STORAGE_PROVIDER=local.');
   }
 
-  return createGoogleDriveStorageAdapter();
+  return createLocalStorageAdapter();
 }

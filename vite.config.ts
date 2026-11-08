@@ -6,7 +6,18 @@ export default defineConfig({
   base: '/',
   server: {
     proxy: {
-      '/api': 'http://localhost:8787',
+      '/api': {
+        target: 'http://127.0.0.1:8787',
+        changeOrigin: true,
+        configure: (proxy) => {
+          proxy.on('proxyReq', (proxyRequest) => {
+            const host = proxyRequest.getHeader('host');
+            if (typeof host === 'string') {
+              proxyRequest.setHeader('origin', `http://${host}`);
+            }
+          });
+        },
+      },
     },
   },
 });

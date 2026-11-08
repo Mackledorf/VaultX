@@ -10,7 +10,7 @@ export function sessionCookieName() {
 }
 
 export function isPasswordHashConfigured() {
-  return Boolean(process.env.VAULT_PASSWORD_HASH);
+  return Boolean(parsePasswordHash());
 }
 
 export async function hashPassword(password) {
@@ -33,26 +33,21 @@ export async function hashPassword(password) {
 }
 
 export async function verifyPassword(password) {
-  const storedHash = process.env.VAULT_PASSWORD_HASH;
-
-  if (!storedHash) {
+  const parsed = parsePasswordHash();
+  if (!parsed) {
     return false;
   }
 
-  const [scheme, cost, blockSize, parallelization, saltValue, hashValue] = storedHash.split('$');
-
-  if (scheme !== 'scrypt' || !cost || !blockSize || !parallelization || !saltValue || !hashValue) {
+  try {
+    const actual = await scrypt(password, parsed.salt, parsed.expected.length, {
+      N: parsed.cost,
+      r: parsed.blockSize,
+      p: parsed.parallelization,
+    });
+    return parsed.expected.length === actual.length && timingSafeEqual(parsed.expected, actual);
+  } catch {
     return false;
   }
-
-  const expected = Buffer.from(hashValue, 'base64url');
-  const actual = await scrypt(password, Buffer.from(saltValue, 'base64url'), expected.length, {
-    N: Number(cost),
-    r: Number(blockSize),
-    p: Number(parallelization),
-  });
-
-  return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
 export function createSessionToken() {
@@ -72,8 +67,10 @@ export function verifySessionToken(token) {
   }
 
   const [encodedPayload, signature] = token.split('.');
+  const expected = Buffer.from(sign(encodedPayload || ''));
+  const actual = Buffer.from(signature || '');
 
-  if (!encodedPayload || !signature || sign(encodedPayload) !== signature) {
+  if (!encodedPayload || !signature || expected.length !== actual.length || !timingSafeEqual(expected, actual)) {
     return false;
   }
 
@@ -103,4 +100,18 @@ function sign(value) {
   const secret = process.env.SESSION_SECRET || '';
 
   return createHmac('sha256', secret).update(value).digest('base64url');
+}
+
+function parsePasswordHash() {
+  const [scheme, costValue, blockSizeValue, parallelizationValue, saltValue, hashValue] = String(process.env.VAULT_PASSWORD_HASH || '').split('$');
+  const cost = Number(costValue);
+  const blockSize = Number(blockSizeValue);
+  const parallelization = Number(parallelizationValue);
+  const salt = Buffer.from(saltValue || '', 'base64url');
+  const expected = Buffer.from(hashValue || '', 'base64url');
+
+  if (scheme !== 'scrypt' || cost !== 16384 || blockSize !== 8 || parallelization !== 1 || salt.length !== 16 || expected.length !== 64) {
+    return null;
+  }
+  return { cost, blockSize, parallelization, salt, expected };
 }

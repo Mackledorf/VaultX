@@ -1,38 +1,26 @@
-export type ObjectKind = 'image' | 'video';
-
-export type VaultCollection = {
-  id: string;
-  name: string;
-  slug: string;
-  createdAt: string;
-  updatedAt: string;
-  coverEntryId: string | null;
-};
+export type MediaType = 'image' | 'gif' | 'video';
 
 export type VaultEntry = {
   id: string;
-  collectionId: string;
   fileId: string;
-  displayName: string;
   contentType: string;
-  objectKind: ObjectKind;
+  mediaType: MediaType;
   sizeBytes: number;
   createdAt: string;
-  updatedAt: string;
+  tags: string[];
+  hasPreview: boolean;
   mediaUrl: string;
+  previewUrl: string | null;
 };
 
-export type DisplayEntry = VaultEntry & {
-  collection?: VaultCollection;
-};
+export type DisplayEntry = VaultEntry;
 
 export type UploadFileState = 'pending' | 'uploading' | 'saved' | 'failed' | 'skipped';
 
 export type UploadBatchFile = {
   index: number;
-  name: string;
   size: number;
-  type: string;
+  tags: string[];
   status: UploadFileState;
   progress?: number;
   error?: string;
@@ -41,7 +29,6 @@ export type UploadBatchFile = {
 
 export type UploadBatch = {
   id: string;
-  collectionId: string;
   expectedCount: number;
   completedCount: number;
   failedCount: number;

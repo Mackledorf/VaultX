@@ -1,4 +1,5 @@
 import type { KeyboardEvent } from 'react';
+import { Film } from 'lucide-react';
 import type { DisplayEntry } from '../types';
 
 type MediaTileProps = {
@@ -8,10 +9,6 @@ type MediaTileProps = {
 };
 
 export function MediaTile({ entry, mode = 'grid', onSelect }: MediaTileProps) {
-  const isStage = mode === 'stage';
-  const tileClassName = isStage ? 'media-tile media-tile-stage' : 'media-tile media-tile-grid';
-  const mediaClassName = isStage ? 'media media-stage' : 'media media-grid';
-
   function openEditor() {
     onSelect?.(entry);
   }
@@ -25,26 +22,20 @@ export function MediaTile({ entry, mode = 'grid', onSelect }: MediaTileProps) {
 
   return (
     <figure
-      className={tileClassName}
+      className="media-tile"
       onClick={openEditor}
       onKeyDown={onSelect ? handleKeyDown : undefined}
       role={onSelect ? 'button' : undefined}
       tabIndex={onSelect ? 0 : undefined}
-      aria-label={onSelect ? `Open ${entry.displayName}` : undefined}
+      aria-label={onSelect ? `Open ${entry.mediaType} media` : undefined}
     >
-      {entry.objectKind === 'video' ? (
-      <video
-        className={mediaClassName}
-        src={entry.mediaUrl}
-        autoPlay
-        loop
-        muted
-        playsInline
-        controls
-        preload="metadata"
-      />
+      {entry.mediaType === 'video' ? (
+        <div className="media-preview video-preview" aria-hidden="true">
+          <Film size={30} strokeWidth={1.5} />
+          <span>VIDEO</span>
+        </div>
       ) : (
-        <img className={mediaClassName} src={entry.mediaUrl} alt="" loading="lazy" />
+        <img className="media-preview" src={entry.previewUrl || entry.mediaUrl} alt={entry.tags.join(', ')} loading="lazy" decoding="async" />
       )}
     </figure>
   );

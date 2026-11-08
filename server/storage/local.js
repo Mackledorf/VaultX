@@ -1,47 +1,68 @@
-import { createReadStream, existsSync } from 'node:fs';
-import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
+import { chmodSync, createReadStream, mkdirSync } from 'node:fs';
+import { chmod, mkdir, readdir, rename, rm, stat, unlink } from 'node:fs/promises';
 import path from 'node:path';
-import { Readable } from 'node:stream';
-
-const MANIFEST_FILE = 'vaultx-manifest.json';
+import sharp from 'sharp';
+import { dataDirectory } from '../database.js';
 
 export function createLocalStorageAdapter() {
-  const root = process.env.LOCAL_STORAGE_DIR || path.resolve(process.cwd(), '.vaultx-data');
-  const mediaDir = path.join(root, 'media');
-  const manifestPath = path.join(root, MANIFEST_FILE);
+  const mediaDir = path.join(dataDirectory, 'media');
+  const previewDir = path.join(dataDirectory, 'previews');
+  const stagingDir = path.join(dataDirectory, '.staging');
+  for (const directory of [mediaDir, previewDir, stagingDir]) {
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    chmodSync(directory, 0o700);
+  }
 
   async function ensureReady() {
-    await mkdir(mediaDir, { recursive: true });
+    await Promise.all([mediaDir, previewDir, stagingDir].map(async (directory) => {
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      await chmod(directory, 0o700);
+    }));
   }
 
   return {
     provider: 'local',
     configured: true,
-    async readManifest() {
-      await ensureReady();
-
-      if (!existsSync(manifestPath)) {
-        return null;
-      }
-
-      return JSON.parse(await readFile(manifestPath, 'utf8'));
-    },
-    async writeManifest(manifest) {
-      await ensureReady();
-      const tempPath = `${manifestPath}.tmp`;
-      await writeFile(tempPath, `${JSON.stringify(manifest, null, 2)}\n`);
-      await rename(tempPath, manifestPath);
-    },
+    stagingDir,
     async uploadFile({ id, file }) {
       await ensureReady();
-      const extension = file.originalname.split('.').pop()?.toLowerCase() || 'bin';
-      const fileId = `${id}.${extension}`;
+      const fileId = id;
       const targetPath = path.join(mediaDir, fileId);
-      await writeFile(targetPath, file.buffer);
+      await rename(file.path, targetPath);
+      await chmod(targetPath, 0o600);
       return { fileId };
     },
+    async cleanupStaging() {
+      await ensureReady();
+      const entries = await readdir(stagingDir);
+      await Promise.all(entries.map((entry) => rm(path.join(stagingDir, entry), { recursive: true, force: true })));
+    },
     async deleteFile(fileId) {
-      await unlink(path.join(mediaDir, fileId)).catch(() => undefined);
+      await Promise.all([
+        unlinkIfPresent(path.join(mediaDir, fileId)),
+        unlinkIfPresent(path.join(previewDir, `${fileId}.webp`)),
+      ]);
+    },
+    async createPreview(fileId) {
+      const sourcePath = path.join(mediaDir, fileId);
+      const previewPath = path.join(previewDir, `${fileId}.webp`);
+      try {
+        await sharp(sourcePath, { animated: false })
+          .rotate()
+          .resize({ width: 640, height: 480, fit: 'inside', withoutEnlargement: true })
+          .webp({ quality: 76, effort: 4 })
+          .toFile(previewPath);
+        await chmod(previewPath, 0o600);
+        return true;
+      } catch {
+        await unlink(previewPath).catch(() => undefined);
+        return false;
+      }
+    },
+    async streamPreview(fileId) {
+      const previewPath = path.join(previewDir, `${fileId}.webp`);
+      const fileStat = await stat(previewPath);
+      return { stream: createReadStream(previewPath), size: fileStat.size };
     },
     async streamFile(fileId, range) {
       const targetPath = path.join(mediaDir, fileId);
@@ -58,10 +79,6 @@ export function createLocalStorageAdapter() {
   };
 }
 
-export function bufferToStream(buffer) {
-  return Readable.from(buffer);
-}
-
 function parseRange(rangeHeader, size) {
   if (!rangeHeader) {
     return null;
@@ -70,15 +87,26 @@ function parseRange(rangeHeader, size) {
   const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader);
 
   if (!match) {
-    return null;
+    return false;
   }
 
-  const start = match[1] ? Number(match[1]) : 0;
-  const end = match[2] ? Number(match[2]) : size - 1;
+  const isSuffixRange = !match[1];
+  const start = isSuffixRange ? Math.max(0, size - Number(match[2])) : Number(match[1]);
+  const end = isSuffixRange || !match[2] ? size - 1 : Number(match[2]);
 
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) {
-    return null;
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size || end < 0 || (!match[1] && Number(match[2]) <= 0)) {
+    return false;
   }
 
   return { start, end: Math.min(end, size - 1) };
+}
+
+async function unlinkIfPresent(filePath) {
+  try {
+    await unlink(filePath);
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      throw error;
+    }
+  }
 }
