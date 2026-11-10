@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
-    "test": "tsx --test src/lib/recipe.test.ts",
+    "test": "tsx --test src/lib/*.test.ts extension/*.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

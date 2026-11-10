@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Onboard video sources</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="popup">
+      <header class="popup-header">
+        <span class="brand">ONBOARD</span>
+        <h1>Video sources</h1>
+      </header>
+      <button id="scan" class="scan-button" type="button">Scan this page</button>
+      <p id="status" class="status" role="status" aria-live="polite">Scanning active page…</p>
+      <ol id="candidates" class="candidate-list" aria-label="Detected MP4 sources"></ol>
+      <footer>Direct MP4s only. The source opens in Onboard; sites that block cross-origin reads may need the file picker.</footer>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

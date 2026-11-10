@@ -1,6 +1,7 @@
 import type { VideoEditRecipe } from '../types';
 
-const PLAYBACK_RATES = [1, 1.25, 1.5, 1.75, 2];
+const PLAYBACK_RATE_MIN = 0.5;
+const PLAYBACK_RATE_MAX = 2;
 const ROTATIONS = [0, 90, 180, 270] as const;
 const ADJUSTMENT_NAMES = [
   'exposure',
@@ -39,8 +40,12 @@ export function normalizeEditRecipe(value: unknown, sourceDuration: number): Vid
       throw new Error('Choose non-overlapping video sections within the source video.');
     }
     const playbackRate = finiteNumber(segment.playbackRate ?? 1, 'Playback speed');
-    if (!PLAYBACK_RATES.includes(playbackRate)) {
-      throw new Error('Playback speed must be 1x, 1.25x, 1.5x, 1.75x, or 2x.');
+    if (
+      playbackRate < PLAYBACK_RATE_MIN
+      || playbackRate > PLAYBACK_RATE_MAX
+      || Math.abs(playbackRate * 10 - Math.round(playbackRate * 10)) > 1e-8
+    ) {
+      throw new Error('Playback speed must be between 0.5x and 2x in 0.1x increments.');
     }
     segments.push({ startTime, endTime, playbackRate });
     previousEnd = endTime;
@@ -91,7 +96,23 @@ export function validateSourceDimensions(width: number, height: number) {
   }
 }
 
+export function isTimeInSegments(time: number, segments: VideoEditRecipe['segments']) {
+  return segments.some((segment) => time >= segment.startTime && time < segment.endTime);
+}
+
 export function buildGifFilter(recipe: VideoEditRecipe) {
+  const segmentFilters = buildVideoSegmentFilters(recipe, 15);
+  segmentFilters.push('[joined]split[gifsrc][palettesrc]');
+  segmentFilters.push('[palettesrc]palettegen=stats_mode=diff[palette]');
+  segmentFilters.push('[gifsrc][palette]paletteuse=dither=sierra2_4a[out]');
+  return segmentFilters.join(';');
+}
+
+export function buildMp4Filter(recipe: VideoEditRecipe) {
+  return `${buildVideoSegmentFilters(recipe, 30).join(';')};[joined]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[out]`;
+}
+
+function buildVideoSegmentFilters(recipe: VideoEditRecipe, frameRate: number) {
   const { crop, adjustments, rotation } = recipe;
   const exposureGamma = 2 ** (adjustments.exposure / 100);
   const contrast = Math.max(0.1, 1 + adjustments.contrast / 100);
@@ -133,14 +154,11 @@ export function buildGifFilter(recipe: VideoEditRecipe) {
     filters.push(`hqdn3d=${spatialLuma}:${spatialChroma}:${temporalLuma}:${temporalChroma}`);
   }
   const segmentFilters = recipe.segments.map((segment, index) => (
-    `[0:v]trim=start=${segment.startTime}:end=${segment.endTime},setpts=(PTS-STARTPTS)/${segment.playbackRate},${filters.join(',')},fps=15[segment${index}]`
+    `[0:v]trim=start=${segment.startTime}:end=${segment.endTime},setpts=(PTS-STARTPTS)/${segment.playbackRate},${filters.join(',')},fps=${frameRate}[segment${index}]`
   ));
   const segmentInputs = recipe.segments.map((_segment, index) => `[segment${index}]`).join('');
   segmentFilters.push(`${segmentInputs}concat=n=${recipe.segments.length}:v=1:a=0[joined]`);
-  segmentFilters.push('[joined]split[gifsrc][palettesrc]');
-  segmentFilters.push('[palettesrc]palettegen=stats_mode=diff[palette]');
-  segmentFilters.push('[gifsrc][palette]paletteuse=dither=sierra2_4a[out]');
-  return segmentFilters.join(';');
+  return segmentFilters;
 }
 
 function asRecord(value: unknown, error: string): Record<string, unknown> {

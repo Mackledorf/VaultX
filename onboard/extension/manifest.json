@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "Onboard Video Source",
+  "version": "0.1.0",
+  "description": "Find direct MP4 sources on the active page and open them in Onboard.",
+  "permissions": ["activeTab", "scripting"],
+  "action": {
+    "default_title": "Find MP4s for Onboard",
+    "default_popup": "popup.html"
+  }
+}

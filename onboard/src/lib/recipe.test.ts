@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildGifFilter, normalizeEditRecipe, validateSourceDimensions } from './recipe';
+import { buildGifFilter, buildMp4Filter, isTimeInSegments, normalizeEditRecipe, validateSourceDimensions } from './recipe';
 import type { VideoEditRecipe } from '../types';
 
 const baseRecipe: VideoEditRecipe = {
@@ -37,10 +37,16 @@ test('normalizes valid multi-section editing settings and retains the selected a
   assert.equal(recipe.adjustments.contrast, 25);
 });
 
-test('rejects invalid sections, unsafe crop bounds, and unsupported playback rates', () => {
+test('rejects invalid sections, unsafe crop bounds, and playback rates outside 0.5x to 2x in tenths', () => {
   assert.throws(() => normalizeEditRecipe({ ...baseRecipe, segments: [] }, 10), /at least one video section/);
   assert.throws(() => normalizeEditRecipe({ ...baseRecipe, crop: { ...baseRecipe.crop, x: 0.9 } }, 10), /Crop settings/);
   assert.throws(() => normalizeEditRecipe({ ...baseRecipe, segments: [{ ...baseRecipe.segments[0], playbackRate: 3 }] }, 10), /Playback speed/);
+  assert.throws(() => normalizeEditRecipe({ ...baseRecipe, segments: [{ ...baseRecipe.segments[0], playbackRate: 1.25 }] }, 10), /0\.1x increments/);
+  assert.throws(() => normalizeEditRecipe({ ...baseRecipe, segments: [{ ...baseRecipe.segments[0], playbackRate: 0.4 }] }, 10), /0\.1x increments/);
+  assert.equal(normalizeEditRecipe({
+    ...baseRecipe,
+    segments: [{ ...baseRecipe.segments[0], playbackRate: 0.7 }],
+  }, 10).segments[0].playbackRate, 0.7);
 });
 
 test('builds a GIF filter with cuts, rotations, crop, adjustments, and palette output', () => {
@@ -62,6 +68,24 @@ test('builds a GIF filter with cuts, rotations, crop, adjustments, and palette o
   assert.match(filter, /paletteuse=dither=sierra2_4a/);
 });
 
+test('builds an MP4 filter with edits, 30fps output, and browser-compatible dimensions', () => {
+  const recipe = normalizeEditRecipe({
+    ...baseRecipe,
+    segments: [{ startTime: 0, endTime: 2, playbackRate: 1.5 }, { startTime: 4, endTime: 8, playbackRate: 1 }],
+    rotation: 90,
+    crop: { x: 0.1, y: 0.2, width: 0.7, height: 0.6 },
+    adjustments: { ...baseRecipe.adjustments, denoise: 10, sharpness: 30 },
+  }, 10);
+  const filter = buildMp4Filter(recipe);
+
+  assert.match(filter, /transpose=clock/);
+  assert.match(filter, /crop=iw\*0\.7:ih\*0\.6:iw\*0\.1:ih\*0\.2/);
+  assert.match(filter, /setpts=\(PTS-STARTPTS\)\/1\.5/);
+  assert.match(filter, /fps=30\[segment0\]/);
+  assert.match(filter, /concat=n=2:v=1:a=0\[joined\]/);
+  assert.match(filter, /scale=trunc\(iw\/2\)\*2:trunc\(ih\/2\)\*2,setsar=1\[out\]/);
+});
+
 test('accepts large source durations and dimensions without product-imposed limits', () => {
   assert.equal(normalizeEditRecipe({
     ...baseRecipe,
@@ -69,4 +93,18 @@ test('accepts large source durations and dimensions without product-imposed limi
   }, 3600).segments[0].endTime, 3600);
   assert.doesNotThrow(() => validateSourceDimensions(1920, 1080));
   assert.doesNotThrow(() => validateSourceDimensions(12000, 8000));
+});
+
+test('identifies playhead positions inside kept segments, excluding removed gaps and trim endpoints', () => {
+  const segments = [
+    { startTime: 1, endTime: 3, playbackRate: 1 },
+    { startTime: 5, endTime: 8, playbackRate: 1 },
+  ];
+
+  assert.equal(isTimeInSegments(1, segments), true);
+  assert.equal(isTimeInSegments(2.99, segments), true);
+  assert.equal(isTimeInSegments(3, segments), false);
+  assert.equal(isTimeInSegments(4, segments), false);
+  assert.equal(isTimeInSegments(5, segments), true);
+  assert.equal(isTimeInSegments(8, segments), false);
 });

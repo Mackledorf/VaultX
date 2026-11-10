@@ -1,12 +1,16 @@
-import { type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
-import { Check, Crop, Download, Pause, Play, RefreshCw, RotateCw, Upload } from 'lucide-react';
-import { exportGif as exportGifLocally } from '../lib/editor';
-import { validateSourceDimensions } from '../lib/recipe';
+import { type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
+import { Check, ChevronDown, Crop, Download, Link2, Pause, Play, RefreshCw, RotateCw, Scissors, Upload } from 'lucide-react';
+import { exportGif as exportGifLocally, exportMp4 as exportMp4Locally } from '../lib/editor';
+import { isTimeInSegments, validateSourceDimensions } from '../lib/recipe';
+import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
 import type { VideoEditRecipe } from '../types';
 
 const MIN_CROP_SIZE = 0.05;
 const DEFAULT_FRAME_DURATION = 1 / 30;
-const PLAYBACK_RATES = [1, 1.25, 1.5, 1.75, 2] as const;
+const PLAYBACK_RATE_MIN = 0.5;
+const PLAYBACK_RATE_MAX = 2;
+const PLAYBACK_RATE_STEP = 0.1;
+const PLAYBACK_RATE_TICKS = Array.from({ length: 16 }, (_, index) => Number((PLAYBACK_RATE_MIN + index * PLAYBACK_RATE_STEP).toFixed(1)));
 const ROTATIONS = [0, 90, 180, 270] as const;
 const CROP_PRESETS = [
   ['1:1', 1],
@@ -31,14 +35,19 @@ const ADJUSTMENTS = [
 type CropCorner = 'nw' | 'ne' | 'sw' | 'se';
 type CropRect = VideoEditRecipe['crop'];
 type VideoSegment = VideoEditRecipe['segments'][number];
+type RemoteSourceProgressState = RemoteSourceProgress & { fileName: string };
 
 export function OnboardEditor() {
   const fileInput = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const exportController = useRef<AbortController | null>(null);
+  const exportMenuRef = useRef<HTMLDivElement>(null);
+  const remoteImportController = useRef<AbortController | null>(null);
   const dragRef = useRef<{ corner: CropCorner; crop: CropRect; rect: DOMRect } | null>(null);
   const frameDurationRef = useRef(DEFAULT_FRAME_DURATION);
+  const globalKeyHandlerRef = useRef<(event: KeyboardEvent) => void>(() => {});
+  const initialFrameReadyRef = useRef(false);
   const timelineDragRef = useRef<
     | { type: 'scrub' }
     | { type: 'trim'; index: number; edge: 'startTime' | 'endTime'; segments: VideoSegment[]; rect: DOMRect; pointerX: number }
@@ -51,6 +60,9 @@ export function OnboardEditor() {
   const [renameDraft, setRenameDraft] = useState('');
   const [previewUrl, setPreviewUrl] = useState('');
   const [downloadUrl, setDownloadUrl] = useState('');
+  const [exportFormat, setExportFormat] = useState<'gif' | 'mp4'>('gif');
+  const [downloadFormat, setDownloadFormat] = useState<'gif' | 'mp4' | null>(null);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [duration, setDuration] = useState(0);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
@@ -58,6 +70,7 @@ export function OnboardEditor() {
   const [videoFrameStyle, setVideoFrameStyle] = useState<CSSProperties>({});
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
+  const [showCutTooltip, setShowCutTooltip] = useState(false);
   const [cropOverlayVisible, setCropOverlayVisible] = useState(true);
   const [playheadHiddenAfterTrim, setPlayheadHiddenAfterTrim] = useState(false);
   const playheadHiddenAfterTrimRef = useRef(false);
@@ -72,6 +85,10 @@ export function OnboardEditor() {
   const [exportProgress, setExportProgress] = useState(0);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [remoteSourceProgress, setRemoteSourceProgress] = useState<RemoteSourceProgressState | null>(null);
+  const [remoteSourceHandoff] = useState(() => new URLSearchParams(window.location.hash.slice(1)).get('source'));
+  const [remoteSourceUrl, setRemoteSourceUrl] = useState('');
+  const [showRemoteSourceInput, setShowRemoteSourceInput] = useState(false);
 
   useEffect(() => {
     if (!file) return;
@@ -107,6 +124,26 @@ export function OnboardEditor() {
 
   useEffect(() => () => exportController.current?.abort(), []);
 
+  useEffect(() => () => remoteImportController.current?.abort(), []);
+
+  useEffect(() => {
+    if (!exportMenuOpen) return;
+    const closeOnOutsideClick = (event: Event) => {
+      if (event.target instanceof Node && !exportMenuRef.current?.contains(event.target)) {
+        setExportMenuOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExportMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [exportMenuOpen]);
+
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas || !dimensions.width || !dimensions.height) return;
@@ -133,12 +170,16 @@ export function OnboardEditor() {
   function chooseVideo(event: ChangeEvent<HTMLInputElement>) {
     const nextFile = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
+    remoteImportController.current?.abort();
+    remoteImportController.current = null;
+    setRemoteSourceProgress(null);
     loadVideo(nextFile);
   }
 
   function loadVideo(nextFile?: File) {
     setError('');
     setDownloadUrl('');
+    setDownloadFormat(null);
     setDuration(0);
     setSegments([]);
     setCurrentTime(0);
@@ -152,6 +193,7 @@ export function OnboardEditor() {
       setError('Choose an MP4 video.');
       return;
     }
+    initialFrameReadyRef.current = false;
     setFile(nextFile);
     setMediaName(nextFile.name);
     setHasRenamedMedia(false);
@@ -163,6 +205,53 @@ export function OnboardEditor() {
     setAdjustments(Object.fromEntries(ADJUSTMENTS.map(([key]) => [key, 0])));
   }
 
+  function importRemoteSource(value: string) {
+    let sourceUrl: URL;
+    try {
+      sourceUrl = parseRemoteMp4Url(value.trim());
+    } catch (sourceError) {
+      setError(sourceError instanceof Error ? sourceError.message : 'The video source URL is invalid.');
+      return;
+    }
+
+    remoteImportController.current?.abort();
+    const controller = new AbortController();
+    remoteImportController.current = controller;
+    const pathName = sourceUrl.pathname.split('/').filter(Boolean).at(-1) || 'video.mp4';
+    setError('');
+    setRemoteSourceProgress({ fileName: pathName, loaded: 0, total: null });
+
+    void fetchRemoteMp4(sourceUrl, (progress) => {
+      if (remoteImportController.current === controller) {
+        setRemoteSourceProgress({ ...progress, fileName: pathName });
+      }
+    }, controller.signal)
+      .then((sourceFile) => {
+        if (remoteImportController.current !== controller) return;
+        remoteImportController.current = null;
+        setRemoteSourceProgress(null);
+        setRemoteSourceUrl('');
+        setShowRemoteSourceInput(false);
+        loadVideo(sourceFile);
+      })
+      .catch((sourceError: unknown) => {
+        if (remoteImportController.current !== controller || (sourceError instanceof DOMException && sourceError.name === 'AbortError')) return;
+        remoteImportController.current = null;
+        setRemoteSourceProgress(null);
+        setError(`${sourceError instanceof Error ? sourceError.message : 'Could not load this video.'} Use Choose MP4 or drop a file instead.`);
+      });
+  }
+
+  useEffect(() => {
+    if (remoteSourceHandoff === null) return;
+    window.history.replaceState(
+      window.history.state,
+      '',
+      `${window.location.pathname}${window.location.search}`,
+    );
+    importRemoteSource(remoteSourceHandoff);
+  }, [remoteSourceHandoff]);
+
   function beginRename() {
     if (!file) return;
     setRenameDraft(mediaName.replace(/\.[^.]+$/, ''));
@@ -172,9 +261,17 @@ export function OnboardEditor() {
   function finishRename() {
     if (!file) return;
     const baseName = renameDraft.replace(/\s+/g, '-') || 'video';
-    setMediaName(`${baseName}.gif`);
+    setMediaName(`${baseName}.${exportFormat}`);
     setHasRenamedMedia(true);
     setIsRenaming(false);
+  }
+
+  function chooseExportFormat(format: 'gif' | 'mp4') {
+    setExportFormat(format);
+    if (hasRenamedMedia) {
+      setMediaName((current) => `${current.replace(/\.[^.]+$/, '')}.${format}`);
+    }
+    setExportMenuOpen(false);
   }
 
   function cropForAspectRatio(aspectRatio: number, nextRotation = rotation): CropRect {
@@ -207,6 +304,9 @@ export function OnboardEditor() {
   function dropVideo(event: ReactDragEvent<HTMLDivElement>) {
     event.preventDefault();
     setIsDraggingFile(false);
+    remoteImportController.current?.abort();
+    remoteImportController.current = null;
+    setRemoteSourceProgress(null);
     loadVideo(event.dataTransfer.files[0]);
   }
 
@@ -230,6 +330,14 @@ export function OnboardEditor() {
     }
   }
 
+  function onVideoDataReady() {
+    const video = videoRef.current;
+    if (!video || initialFrameReadyRef.current) return;
+    initialFrameReadyRef.current = true;
+    video.pause();
+    video.currentTime = segments[0]?.startTime ?? 0;
+  }
+
   function onTimeUpdate() {
     const video = videoRef.current;
     if (!video || playheadHiddenAfterTrimRef.current) return;
@@ -240,7 +348,7 @@ export function OnboardEditor() {
         video.playbackRate = segments[segmentIndex].playbackRate;
       }
     }
-    if (segmentIndex >= 0 && time >= segments[segmentIndex].endTime - 0.025) {
+    if (!video.paused && segmentIndex >= 0 && time >= segments[segmentIndex].endTime - 0.025) {
       const nextSegment = segments[segmentIndex + 1];
       if (nextSegment) {
         video.currentTime = nextSegment.startTime;
@@ -311,6 +419,55 @@ export function OnboardEditor() {
     setCurrentTime(resolvedTime);
   }
 
+  function scrubByFrame(direction: -1 | 1) {
+    if (!segments.length) return;
+    const video = videoRef.current;
+    const frameDuration = frameDurationRef.current;
+
+    if (playheadHiddenAfterTrimRef.current) {
+      const selected = segments[selectedSegmentIndex] ?? segments[0];
+      if (!selected) return;
+      const target = direction < 0
+        ? Math.max(selected.startTime, selected.endTime - frameDuration)
+        : selected.startTime;
+      playheadHiddenAfterTrimRef.current = false;
+      setPlayheadHiddenAfterTrim(false);
+      video?.pause();
+      seekVideo(target);
+      setShowCutTooltip(false);
+      return;
+    }
+
+    const time = video?.currentTime ?? currentTime;
+    let activeIndex = segments.findIndex((segment) => time >= segment.startTime && time < segment.endTime);
+    if (activeIndex < 0) {
+      activeIndex = selectedSegmentIndex;
+    }
+    const active = segments[activeIndex];
+    if (!active) return;
+
+    let target: number;
+    if (direction < 0) {
+      if (time - frameDuration >= active.startTime) {
+        target = time - frameDuration;
+      } else {
+        const previous = segments[activeIndex - 1];
+        target = previous
+          ? Math.max(previous.startTime, previous.endTime - frameDuration)
+          : active.startTime;
+      }
+    } else if (time + frameDuration < active.endTime) {
+      target = time + frameDuration;
+    } else {
+      const next = segments[activeIndex + 1];
+      target = next ? next.startTime : Math.max(active.startTime, active.endTime - frameDuration);
+    }
+
+    video?.pause();
+    seekVideo(target);
+    setShowCutTooltip(false);
+  }
+
   function getTimelineTime(event: PointerEvent<HTMLDivElement>) {
     const bounds = event.currentTarget.getBoundingClientRect();
     if (!bounds.width) return 0;
@@ -335,27 +492,30 @@ export function OnboardEditor() {
         pointerX: event.clientX,
       };
       setSelectedSegmentIndex(segmentIndex);
+      videoRef.current?.pause();
+      setShowCutTooltip(false);
       return;
     }
-    const playhead = event.target instanceof HTMLElement ? event.target.closest('.timeline-playhead') : null;
-    if (!playhead) return;
+    const time = getTimelineTime(event);
+    if (!isTimeInSegments(time, segments)) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     timelineDragRef.current = { type: 'scrub' };
+    playheadHiddenAfterTrimRef.current = false;
+    setPlayheadHiddenAfterTrim(false);
+    event.currentTarget.focus({ preventScroll: true });
+    videoRef.current?.pause();
+    setShowCutTooltip(false);
+    seekVideo(time);
   }
 
-  function onTimelineKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
-    if (!duration) return;
-    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-      event.preventDefault();
-      seekVideo(currentTime + (event.key === 'ArrowLeft' ? -frameDurationRef.current : frameDurationRef.current));
-    } else if (event.key === 'Home') {
-      event.preventDefault();
-      seekVideo(0);
-    } else if (event.key === 'End') {
-      event.preventDefault();
-      seekVideo(duration);
-    }
+  function onTimelineDoubleClick(event: ReactMouseEvent<HTMLDivElement>) {
+    if (!duration || playheadHiddenAfterTrim) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const playheadX = bounds.left + (currentTime / duration) * bounds.width;
+    if (Math.abs(event.clientX - playheadX) > 8) return;
+    event.preventDefault();
+    setShowCutTooltip(true);
   }
 
   function onTimelinePointerMove(event: PointerEvent<HTMLDivElement>) {
@@ -376,22 +536,20 @@ export function OnboardEditor() {
       const upperBound = index < drag.segments.length - 1 ? drag.segments[index + 1].startTime : duration;
       updated[index].endTime = clamp(segment.endTime + delta, segment.startTime + 0.001, upperBound);
     }
-    if (!playheadHiddenAfterTrim) {
+    const playheadRemainsInKeptVideo = isTimeInSegments(currentTime, updated);
+    if (!playheadRemainsInKeptVideo && !playheadHiddenAfterTrim) {
       playheadHiddenAfterTrimRef.current = true;
       setPlayheadHiddenAfterTrim(true);
       videoRef.current?.pause();
+    } else if (playheadRemainsInKeptVideo && playheadHiddenAfterTrim) {
+      playheadHiddenAfterTrimRef.current = false;
+      setPlayheadHiddenAfterTrim(false);
     }
     setSegments(updated);
   }
 
   function onTimelinePointerUp() {
-    const drag = timelineDragRef.current;
     timelineDragRef.current = null;
-    if (drag?.type !== 'trim' || !playheadHiddenAfterTrimRef.current) return;
-    const firstSegment = segments[0];
-    if (!firstSegment) return;
-    if (videoRef.current) videoRef.current.currentTime = firstSegment.startTime;
-    setCurrentTime(firstSegment.startTime);
   }
 
   function onTrimHandleKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
@@ -411,18 +569,23 @@ export function OnboardEditor() {
       const upperBound = index < segments.length - 1 ? segments[index + 1].startTime : duration;
       updated[index].endTime = clamp(segment.endTime + delta, segment.startTime + 0.001, upperBound);
     }
-    playheadHiddenAfterTrimRef.current = true;
-    setPlayheadHiddenAfterTrim(true);
     videoRef.current?.pause();
     setSegments(updated);
     setSelectedSegmentIndex(index);
-    if (videoRef.current) videoRef.current.currentTime = updated[0].startTime;
-    setCurrentTime(updated[0].startTime);
+    setShowCutTooltip(false);
+    if (isTimeInSegments(currentTime, updated)) {
+      playheadHiddenAfterTrimRef.current = false;
+      setPlayheadHiddenAfterTrim(false);
+    } else {
+      playheadHiddenAfterTrimRef.current = true;
+      setPlayheadHiddenAfterTrim(true);
+    }
   }
 
   function cutAtTime(time: number) {
     const index = getSegmentIndexAtCutTime(time);
     if (index < 0) return;
+    setShowCutTooltip(false);
     const selected = segments[index];
     const next = [
       ...segments.slice(0, index),
@@ -452,6 +615,9 @@ export function OnboardEditor() {
     setSegments(next);
     setSelectedSegmentIndex(nextIndex);
     const nextTime = next[nextIndex].startTime;
+    playheadHiddenAfterTrimRef.current = false;
+    setPlayheadHiddenAfterTrim(false);
+    setShowCutTooltip(false);
     if (videoRef.current) {
       videoRef.current.currentTime = nextTime;
       videoRef.current.playbackRate = next[nextIndex].playbackRate;
@@ -478,6 +644,41 @@ export function OnboardEditor() {
     if (segments.length <= 1 || !segments[index]) return;
     setSelectedSegmentIndex(index);
   }
+
+  globalKeyHandlerRef.current = (event) => {
+    if (!file || event.altKey || event.ctrlKey || event.metaKey) return;
+    const activeElement = document.activeElement;
+    const isTextEntry = activeElement instanceof HTMLElement && (
+      activeElement.isContentEditable
+      || activeElement instanceof HTMLTextAreaElement
+      || (activeElement instanceof HTMLInputElement && !['range', 'button', 'checkbox', 'radio'].includes(activeElement.type))
+      || activeElement instanceof HTMLSelectElement
+    );
+    if (isTextEntry) return;
+
+    if (event.code === 'Space' || event.key === ' ') {
+      event.preventDefault();
+      void togglePlayback();
+    } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      scrubByFrame(event.key === 'ArrowLeft' ? -1 : 1);
+    } else if (event.key === 'Home') {
+      event.preventDefault();
+      videoRef.current?.pause();
+      seekVideo(segments[0]?.startTime ?? 0);
+    } else if (event.key === 'End') {
+      event.preventDefault();
+      const lastSegment = segments[segments.length - 1];
+      videoRef.current?.pause();
+      seekVideo(lastSegment ? Math.max(lastSegment.startTime, lastSegment.endTime - frameDurationRef.current) : 0);
+    }
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => globalKeyHandlerRef.current(event);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   function updateCrop(event: PointerEvent<HTMLDivElement>) {
     const drag = dragRef.current;
@@ -515,10 +716,16 @@ export function OnboardEditor() {
     setBusy(true);
     setError('');
     setDownloadUrl('');
+    setDownloadFormat(null);
     setExportProgress(0);
     try {
-      const gif = await exportGifLocally(file, recipe(), duration, setExportProgress, controller.signal);
-      if (!controller.signal.aborted) setDownloadUrl(URL.createObjectURL(gif));
+      const output = exportFormat === 'gif'
+        ? await exportGifLocally(file, recipe(), duration, setExportProgress, controller.signal)
+        : await exportMp4Locally(file, recipe(), duration, setExportProgress, controller.signal);
+      if (!controller.signal.aborted) {
+        setDownloadUrl(URL.createObjectURL(output));
+        setDownloadFormat(exportFormat);
+      }
     } catch (exportError) {
       setError(controller.signal.aborted
         ? 'Export cancelled.'
@@ -549,6 +756,9 @@ export function OnboardEditor() {
     height: `${crop.height * 100}%`,
   };
   const excludedRanges: Array<{ startTime: number; endTime: number }> = [];
+  const selectedTimelineSegment = segments[selectedSegmentIndex];
+  const playheadInSelectedSegment = selectedTimelineSegment !== undefined
+    && isTimeInSegments(currentTime, [selectedTimelineSegment]);
   if (duration > 0) {
     let keptThrough = 0;
     for (const segment of segments) {
@@ -569,6 +779,8 @@ export function OnboardEditor() {
     const fillStart = Math.min(zeroPosition, valuePosition);
     const fillEnd = Math.max(zeroPosition, valuePosition);
     const track = `linear-gradient(to right, #505659 0%, #505659 ${fillStart}%, var(--accent) ${fillStart}%, var(--accent) ${fillEnd}%, #505659 ${fillEnd}%, #505659 100%)`;
+    const tickPosition = `calc(5px + ${zeroPosition}% - ${zeroPosition / 10}px)`;
+    const defaultTick = `linear-gradient(to bottom, transparent 2px, #a4a8ac 2px, #a4a8ac 8px, transparent 8px) ${tickPosition} center / 1px 10px no-repeat`;
     return (
       <input
         type="range"
@@ -579,7 +791,7 @@ export function OnboardEditor() {
         value={value}
         disabled={!file}
         data-adjusted={value !== 0}
-        style={{ background: `${track} center / 100% 2px no-repeat` }}
+        style={{ background: `${defaultTick}, ${track} center / 100% 2px no-repeat` }}
         onChange={(event) => {
           const value = Number(event.currentTarget.value);
           setAdjustments((current) => ({ ...current, [key]: value }));
@@ -608,27 +820,71 @@ export function OnboardEditor() {
                   }
                 }}
               />
-              <span>{hasRenamedMedia ? '.gif' : file.name.match(/\.[^.]+$/)?.[0] ?? '.mp4'}</span>
+              <span>{hasRenamedMedia ? `.${exportFormat}` : file.name.match(/\.[^.]+$/)?.[0] ?? '.mp4'}</span>
             </>
           ) : file ? (
             <button className="project-name-button" type="button" onClick={beginRename} aria-label={`Rename video ${mediaName}`}>
               {mediaName}
             </button>
           ) : (
-            <span>Untitled GIF</span>
+            <span>Untitled {exportFormat.toUpperCase()}</span>
           )}
         </div>
-        {busy
-          ? (
+        {busy ? (
             <div className="export-status" aria-live="polite">
               <div className="progress-track"><span style={{ width: `${exportProgress}%` }} /></div>
-              <span className="export-progress-label">{exportProgress < 5 ? 'Loading editor' : 'Encoding'} · {exportProgress}%</span>
+              <span className="export-progress-label">{exportFormat.toUpperCase()} · {exportProgress < 5 ? 'Loading editor' : 'Encoding'} · {exportProgress}%</span>
               <button className="export-cancel" type="button" onClick={cancelExport}>Cancel</button>
             </div>
-          )
-          : downloadUrl
-          ? <a className="export-button ready" href={downloadUrl} download={`${mediaName.replace(/\.[^.]+$/, '') || 'onboard'}.gif`}><Check size={15} /> Download GIF</a>
-          : <button className="export-button" type="button" onClick={startExport} disabled={!file || !duration || !sourceDimensionsValid || !segments.length}><Download size={15} /> Export GIF</button>}
+          ) : (
+            <div className="export-dropdown" ref={exportMenuRef}>
+              {downloadUrl && downloadFormat === exportFormat ? (
+                <a
+                  className="export-button ready"
+                  href={downloadUrl}
+                  download={`${mediaName.replace(/\.[^.]+$/, '') || 'onboard'}.${exportFormat}`}
+                >
+                  <Check size={15} /> Download {exportFormat.toUpperCase()}
+                </a>
+              ) : (
+                <button
+                  className="export-button"
+                  type="button"
+                  onClick={startExport}
+                  disabled={!file || !duration || !sourceDimensionsValid || !segments.length}
+                >
+                  <Download size={15} /> Export {exportFormat.toUpperCase()}
+                </button>
+              )}
+              <button
+                className="export-dropdown-toggle"
+                type="button"
+                aria-label="Choose export format"
+                aria-haspopup="menu"
+                aria-expanded={exportMenuOpen}
+                onClick={() => setExportMenuOpen((open) => !open)}
+              >
+                <ChevronDown size={15} />
+              </button>
+              {exportMenuOpen && (
+                <div className="export-format-menu" role="menu" aria-label="Export format">
+                  {(['gif', 'mp4'] as const).map((format) => (
+                    <button
+                      className="export-format-option"
+                      key={format}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={exportFormat === format}
+                      onClick={() => chooseExportFormat(format)}
+                    >
+                      {format === exportFormat && <Check size={14} />}
+                      <span>Export as {format.toUpperCase()}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
       </header>
 
       <section className="editor-main" aria-label="Video editor">
@@ -671,30 +927,86 @@ export function OnboardEditor() {
           </section>
 
           <section className="tool-section speed-section">
-            <h2>Playback Rate</h2>
-            <div className="speed-options" role="group" aria-label="Selected section playback speed">
-              {PLAYBACK_RATES.map((rate) => (
-                <button
-                  key={rate}
-                  className={selectedSegment()?.playbackRate === rate ? 'speed-option active' : 'speed-option'}
-                  type="button"
-                  aria-pressed={selectedSegment()?.playbackRate === rate}
-                  disabled={!selectedSegment()}
-                  onClick={() => setSelectedSegmentSpeed(rate)}
-                >
-                  {rate}×
-                </button>
-              ))}
+            <div className="speed-heading">
+              <h2>Playback Rate</h2>
+              <output htmlFor="playback-rate">{(selectedSegment()?.playbackRate ?? 1).toFixed(1)}×</output>
+            </div>
+            <div className="speed-control">
+              <input
+                id="playback-rate"
+                type="range"
+                aria-label="Selected section playback speed"
+                aria-valuetext={`${(selectedSegment()?.playbackRate ?? 1).toFixed(1)}×`}
+                min={PLAYBACK_RATE_MIN}
+                max={PLAYBACK_RATE_MAX}
+                step={PLAYBACK_RATE_STEP}
+                value={selectedSegment()?.playbackRate ?? 1}
+                disabled={!selectedSegment()}
+                onChange={(event) => setSelectedSegmentSpeed(Number(Number(event.currentTarget.value).toFixed(1)))}
+              />
+              <div className="speed-slider-ticks" aria-hidden="true">
+                {PLAYBACK_RATE_TICKS.map((rate, index) => (
+                  <span
+                    className={index % 5 === 0 || index === PLAYBACK_RATE_TICKS.length - 1 ? 'major' : ''}
+                    key={rate}
+                    style={{ left: `${(index / (PLAYBACK_RATE_TICKS.length - 1)) * 100}%` }}
+                  />
+                ))}
+              </div>
+              <div className="speed-slider-labels" aria-hidden="true">
+                <span>0.5×</span>
+                <span>2.0×</span>
+              </div>
             </div>
           </section>
 
           <section className="tool-section source-section">
             <h2>Source</h2>
-            <button className="tool-button" type="button" onClick={() => fileInput.current?.click()}>
-              <Upload size={15} />
-              {file ? 'Replace media' : 'Choose MP4'}
-            </button>
+            <div className="source-actions">
+              <button className="tool-button" type="button" onClick={() => fileInput.current?.click()}>
+                <Upload size={15} />
+                {file ? 'Replace media' : 'Choose MP4'}
+              </button>
+              <button
+                className="source-url-toggle"
+                type="button"
+                aria-label="Load video from URL"
+                aria-expanded={showRemoteSourceInput}
+                title="Load video from URL"
+                onClick={() => setShowRemoteSourceInput((visible) => !visible)}
+              >
+                <Link2 size={16} />
+              </button>
+            </div>
             <input ref={fileInput} className="visually-hidden" type="file" accept="video/mp4,.mp4" onChange={chooseVideo} />
+            {showRemoteSourceInput && (
+              <form
+                className="source-url-form"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  importRemoteSource(remoteSourceUrl);
+                }}
+              >
+                <label className="visually-hidden" htmlFor="source-video-url">Video source URL</label>
+                <input
+                  id="source-video-url"
+                  type="url"
+                  placeholder="https://example.com/video.mp4"
+                  value={remoteSourceUrl}
+                  onChange={(event) => setRemoteSourceUrl(event.currentTarget.value)}
+                  required
+                />
+                <button className="tool-button" type="submit" disabled={remoteSourceProgress !== null}>
+                  {remoteSourceProgress ? 'Loading…' : 'Load URL'}
+                </button>
+                {remoteSourceProgress && (
+                  <span className="source-url-progress" role="status">
+                    Loading {remoteSourceProgress.fileName} · {formatByteCount(remoteSourceProgress.loaded)}
+                    {remoteSourceProgress.total ? ` of ${formatByteCount(remoteSourceProgress.total)}` : ''}
+                  </span>
+                )}
+              </form>
+            )}
           </section>
         </aside>
 
@@ -711,8 +1023,36 @@ export function OnboardEditor() {
           >
             {!file ? (
               <div className="dropzone">
-                <strong>Drop an MP4 to begin</strong>
-                <span>or <button type="button" onClick={() => fileInput.current?.click()}>browse files</button></span>
+                {remoteSourceProgress ? (
+                  <>
+                    <strong>Loading {remoteSourceProgress.fileName}</strong>
+                    <div
+                      className={remoteSourceProgress.total ? 'remote-import-progress' : 'remote-import-progress indeterminate'}
+                      role="progressbar"
+                      aria-label="Video import progress"
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={remoteSourceProgress.total
+                        ? Math.min(100, Math.round((remoteSourceProgress.loaded / remoteSourceProgress.total) * 100))
+                        : undefined}
+                    >
+                      <span style={{
+                        width: remoteSourceProgress.total
+                          ? `${Math.min(100, (remoteSourceProgress.loaded / remoteSourceProgress.total) * 100)}%`
+                          : undefined,
+                      }} />
+                    </div>
+                    <span aria-live="polite">
+                      {formatByteCount(remoteSourceProgress.loaded)}
+                      {remoteSourceProgress.total ? ` of ${formatByteCount(remoteSourceProgress.total)}` : ' loaded'}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <strong>Drop an MP4 to begin</strong>
+                    <span>or <button type="button" onClick={() => fileInput.current?.click()}>browse files</button></span>
+                  </>
+                )}
               </div>
             ) : (
               <div className="onboard-video-frame" style={videoFrameStyle} onPointerMove={updateCrop} onPointerUp={clearCropDrag} onPointerCancel={clearCropDrag}>
@@ -722,17 +1062,12 @@ export function OnboardEditor() {
                   className="onboard-video"
                   style={videoStyle}
                   playsInline
-                  preload="metadata"
+                  preload="auto"
                   tabIndex={0}
                   aria-label={`Video preview. Click to ${cropOverlayVisible ? 'hide' : 'show'} crop marks. Press Space to play or pause.`}
                   onClick={() => setCropOverlayVisible((visible) => !visible)}
-                  onKeyDown={(event) => {
-                    if (event.key === ' ') {
-                      event.preventDefault();
-                      void togglePlayback();
-                    }
-                  }}
                   onLoadedMetadata={onMetadata}
+                  onLoadedData={onVideoDataReady}
                   onTimeUpdate={onTimeUpdate}
                   onPlay={() => setPlaying(true)}
                   onPause={() => setPlaying(false)}
@@ -787,7 +1122,6 @@ export function OnboardEditor() {
             </div>
           </section>
         </aside>
-      </section>
 
       <section className="timeline-editor" aria-label="Video editing timeline">
         <div className="timeline-toolbar">
@@ -815,7 +1149,7 @@ export function OnboardEditor() {
           onPointerMove={onTimelinePointerMove}
           onPointerUp={onTimelinePointerUp}
           onPointerCancel={onTimelinePointerUp}
-          onKeyDown={onTimelineKeyDown}
+          onDoubleClick={onTimelineDoubleClick}
         >
           {excludedRanges.map((range) => (
             <span
@@ -833,7 +1167,7 @@ export function OnboardEditor() {
               key={`${segment.startTime}-${segment.endTime}`}
               className={
                 segments.length === 1
-                  ? 'timeline-segment trim-active'
+                  ? `timeline-segment trim-active${index === selectedSegmentIndex ? ' selected' : ''}`
                   : index === selectedSegmentIndex
                     ? 'timeline-segment selected'
                     : 'timeline-segment'
@@ -861,7 +1195,7 @@ export function OnboardEditor() {
           ))}
           {duration > 0 && !playheadHiddenAfterTrim && (
             <span
-              className="timeline-playhead"
+              className={`timeline-playhead${playheadInSelectedSegment ? ' selected' : ''}`}
               role="slider"
               aria-label="Timeline playhead"
               aria-valuemin={0}
@@ -872,7 +1206,28 @@ export function OnboardEditor() {
               style={{ left: `${(currentTime / duration) * 100}%` }}
             />
           )}
+          {showCutTooltip && duration > 0 && !playheadHiddenAfterTrim && (
+            <button
+              className="timeline-cut-tooltip"
+              type="button"
+              aria-label={`Cut at ${formatTime(currentTime)}`}
+              title="Cut at this frame"
+              disabled={!canCutAtTime(currentTime)}
+              style={{ left: `${(currentTime / duration) * 100}%` }}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+              }}
+              onClick={(event) => {
+                event.stopPropagation();
+                cutAtTime(currentTime);
+              }}
+            >
+              <Scissors size={14} />
+            </button>
+          )}
         </div>
+      </section>
       </section>
     </main>
   );
