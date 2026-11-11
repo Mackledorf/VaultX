@@ -1,7 +1,8 @@
 import { type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
 import { ArrowDownUp, Check, ChevronDown, Copy, Crop, Download, Link2, List, Pause, Play, RefreshCw, RotateCw, Scissors, Trash2, Upload, X } from 'lucide-react';
 import { exportGif as exportGifLocally, exportMp4 as exportMp4Locally } from '../lib/editor';
-import { buildPreviewTransferTable, getEditedDuration, isIncreaseOnlyAdjustment, isTimeInSegments, validateSourceDimensions } from '../lib/recipe';
+import { MAX_EXPORT_BYTES } from '../lib/exportSizing';
+import { buildPreviewTransferTable, getEditedDuration, isIncreaseOnlyAdjustment, isTimeInSegments, preflightExport, validateSourceDimensions } from '../lib/recipe';
 import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
 import type { VideoEditRecipe } from '../types';
 
@@ -56,6 +57,8 @@ type ExportJob = {
   file: File;
   recipe: VideoEditRecipe;
   duration: number;
+  width: number;
+  height: number;
   format: 'gif' | 'mp4';
   fileName: string;
   status: 'queued' | 'exporting' | 'error';
@@ -1235,6 +1238,8 @@ export function OnboardEditor() {
               job.file,
               job.recipe,
               job.duration,
+              job.width,
+              job.height,
               (progress) => updateExportJobs((current) => current.map((item) => (
                 item.id === job.id ? { ...item, progress } : item
               ))),
@@ -1244,6 +1249,8 @@ export function OnboardEditor() {
               job.file,
               job.recipe,
               job.duration,
+              job.width,
+              job.height,
               (progress) => updateExportJobs((current) => current.map((item) => (
                 item.id === job.id ? { ...item, progress } : item
               ))),
@@ -1277,17 +1284,26 @@ export function OnboardEditor() {
   function startExport() {
     if (!file || !segments.length || !sourceDimensionsValid) return;
     const format = exportFormat;
+    const recipe = {
+      segments: segments.map((segment) => ({ ...segment })),
+      rotation,
+      crop: { ...crop },
+      adjustments: { ...adjustments },
+    };
+    try {
+      preflightExport(recipe, duration, dimensions.width, dimensions.height);
+    } catch (preflightError) {
+      setError(preflightError instanceof Error ? preflightError.message : 'Export settings are invalid.');
+      return;
+    }
     const baseName = mediaName.replace(/\.[^.]+$/, '') || 'onboard';
     const job: ExportJob = {
       id: crypto.randomUUID(),
       file,
-      recipe: {
-        segments: segments.map((segment) => ({ ...segment })),
-        rotation,
-        crop: { ...crop },
-        adjustments: { ...adjustments },
-      },
+      recipe,
       duration,
+      width: dimensions.width,
+      height: dimensions.height,
       format,
       fileName: `${baseName}.${format}`,
       status: 'queued',
@@ -1510,7 +1526,7 @@ export function OnboardEditor() {
                     onClick={() => chooseExportFormat(format)}
                   >
                     {format === exportFormat && <Check size={14} />}
-                    <span>Export as {format.toUpperCase()}</span>
+                    <span>Export as {format.toUpperCase()} · up to {Math.round(MAX_EXPORT_BYTES[format] / 1_000_000)} MB</span>
                   </button>
                 ))}
               </div>

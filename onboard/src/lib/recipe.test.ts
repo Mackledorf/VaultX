@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildGifFilter, buildMp4Filter, buildPreviewTransferTable, getEditedDuration, isTimeInSegments, normalizeEditRecipe, validateSourceDimensions } from './recipe';
+import { buildGifFilter, buildMp4Filter, buildPreviewTransferTable, getEditedDuration, isTimeInSegments, normalizeEditRecipe, preflightExport, validateSourceDimensions } from './recipe';
 import type { VideoEditRecipe } from '../types';
 
 const baseRecipe: VideoEditRecipe = {
@@ -49,6 +49,14 @@ test('rejects invalid sections, unsafe crop bounds, and playback rates outside 0
   }, 10).segments[0].playbackRate, 0.7);
 });
 
+test('preflights crop dimensions before encoder startup', () => {
+  assert.throws(
+    () => preflightExport({ ...baseRecipe, crop: { x: 0, y: 0, width: 0.05, height: 1 } }, 10, 20, 1080),
+    /crop is too small/,
+  );
+  assert.equal(preflightExport(baseRecipe, 10, 1920, 1080).crop.width, 1);
+});
+
 test('requires detail adjustments to be increase-only', () => {
   for (const name of ['sharpness', 'definition', 'clarity', 'denoise']) {
     assert.throws(() => normalizeEditRecipe({
@@ -78,6 +86,32 @@ test('builds a GIF filter with cuts, rotations, crop, adjustments, and palette o
   assert.match(filter, /setpts=\(PTS-STARTPTS\)\/2/);
   assert.match(filter, /setpts=\(PTS-STARTPTS\)\/1/);
   assert.match(filter, /paletteuse=dither=sierra2_4a/);
+});
+
+test('uses lower frame rates, dimensions, and stable dithering for GIF size fallbacks', () => {
+  const filter = buildGifFilter(baseRecipe, {
+    frameRate: 10,
+    maxDimension: 480,
+    dither: 'bayer:bayer_scale=3',
+  });
+
+  assert.match(filter, /scale=w='min\(iw,480\)'/);
+  assert.match(filter, /fps=10,scale=w='min\(iw,480\)'/);
+  assert.match(filter, /paletteuse=dither=bayer:bayer_scale=3/);
+});
+
+test('samples output frames before frame-local adjustments but keeps temporal denoise before sampling', () => {
+  const defaultFilter = buildGifFilter(baseRecipe);
+  assert.ok(defaultFilter.indexOf('fps=15') < defaultFilter.indexOf('lutrgb='));
+
+  const scaledFilter = buildGifFilter(baseRecipe, { maxDimension: 480 });
+  assert.ok(scaledFilter.indexOf('fps=15') < scaledFilter.indexOf('scale=w='));
+
+  const denoisedFilter = buildGifFilter({
+    ...baseRecipe,
+    adjustments: { ...baseRecipe.adjustments, denoise: 20 },
+  });
+  assert.ok(denoisedFilter.indexOf('hqdn3d=') < denoisedFilter.indexOf('fps=15'));
 });
 
 test('applies clarity as an increase-only unsharp filter in GIF and MP4 exports', () => {
@@ -120,9 +154,18 @@ test('builds an MP4 filter with edits, 30fps output, and browser-compatible dime
   assert.match(filter, /transpose=clock/);
   assert.match(filter, /crop=iw\*0\.7:ih\*0\.6:iw\*0\.1:ih\*0\.2/);
   assert.match(filter, /setpts=\(PTS-STARTPTS\)\/1\.5/);
-  assert.match(filter, /fps=30\[segment0\]/);
+  assert.match(filter, /fps=30,/);
   assert.match(filter, /concat=n=2:v=1:a=0\[joined\]/);
   assert.match(filter, /unsharp=5:5:0\.440:5:5:0/);
+  assert.match(filter, /scale=trunc\(iw\/2\)\*2:trunc\(ih\/2\)\*2,setsar=1\[out\]/);
+});
+
+test('bounds MP4 fallback dimensions while retaining the output frame rate', () => {
+  const filter = buildMp4Filter(baseRecipe, 720);
+
+  assert.match(filter, /fps=30,/);
+  assert.match(filter, /scale=w='min\(iw,720\)'/);
+  assert.match(filter, /fps=30,scale=w='min\(iw,720\)'/);
   assert.match(filter, /scale=trunc\(iw\/2\)\*2:trunc\(ih\/2\)\*2,setsar=1\[out\]/);
 });
 

@@ -95,6 +95,25 @@ export function normalizeEditRecipe(value: unknown, sourceDuration: number): Vid
   };
 }
 
+export function preflightExport(
+  value: unknown,
+  sourceDuration: number,
+  sourceWidth: number,
+  sourceHeight: number,
+) {
+  const recipe = normalizeEditRecipe(value, sourceDuration);
+  validateSourceDimensions(sourceWidth, sourceHeight);
+
+  const rotatedWidth = recipe.rotation === 90 || recipe.rotation === 270 ? sourceHeight : sourceWidth;
+  const rotatedHeight = recipe.rotation === 90 || recipe.rotation === 270 ? sourceWidth : sourceHeight;
+  const cropWidth = Math.floor(rotatedWidth * recipe.crop.width);
+  const cropHeight = Math.floor(rotatedHeight * recipe.crop.height);
+  if (cropWidth < 2 || cropHeight < 2) {
+    throw new Error('The current crop is too small for the source video. Choose a larger crop before exporting.');
+  }
+  return recipe;
+}
+
 export function validateSourceDimensions(width: number, height: number) {
   if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
     throw new Error('Could not read the source video dimensions.');
@@ -112,16 +131,19 @@ export function getEditedDuration(segments: VideoEditRecipe['segments']) {
   );
 }
 
-export function buildGifFilter(recipe: VideoEditRecipe) {
-  const segmentFilters = buildVideoSegmentFilters(recipe, 15);
+export function buildGifFilter(
+  recipe: VideoEditRecipe,
+  options: { frameRate?: number; maxDimension?: number; dither?: string } = {},
+) {
+  const segmentFilters = buildVideoSegmentFilters(recipe, options.frameRate ?? 15, options.maxDimension);
   segmentFilters.push('[joined]split[gifsrc][palettesrc]');
   segmentFilters.push('[palettesrc]palettegen=stats_mode=diff[palette]');
-  segmentFilters.push('[gifsrc][palette]paletteuse=dither=sierra2_4a[out]');
+  segmentFilters.push(`[gifsrc][palette]paletteuse=dither=${options.dither ?? 'sierra2_4a'}[out]`);
   return segmentFilters.join(';');
 }
 
-export function buildMp4Filter(recipe: VideoEditRecipe) {
-  return `${buildVideoSegmentFilters(recipe, 30).join(';')};[joined]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[out]`;
+export function buildMp4Filter(recipe: VideoEditRecipe, maxDimension?: number) {
+  return `${buildVideoSegmentFilters(recipe, 30, maxDimension).join(';')};[joined]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[out]`;
 }
 
 export function buildPreviewTransferTable(adjustments: Record<string, number>) {
@@ -129,7 +151,7 @@ export function buildPreviewTransferTable(adjustments: Record<string, number>) {
   return Array.from({ length: 256 }, (_, value) => applyColorTransform(value / 255, transform) * 255);
 }
 
-function buildVideoSegmentFilters(recipe: VideoEditRecipe, frameRate: number) {
+function buildVideoSegmentFilters(recipe: VideoEditRecipe, frameRate: number, maxDimension?: number) {
   const { crop, adjustments, rotation } = recipe;
   const transform = getColorTransform(adjustments);
   const unsharpAmount = (adjustments.sharpness + adjustments.definition * 0.7) / 100;
@@ -142,27 +164,42 @@ function buildVideoSegmentFilters(recipe: VideoEditRecipe, frameRate: number) {
       : rotation === 270
         ? ['transpose=cclock']
         : [];
-  const filters = [
-    ...rotationFilters,
-    `crop=iw*${crop.width}:ih*${crop.height}:iw*${crop.x}:ih*${crop.y}`,
+  const frameFilters = [
     `lutrgb=r='${buildColorTransformExpression(transform)}':g='${buildColorTransformExpression(transform)}':b='${buildColorTransformExpression(transform)}'`,
     `eq=saturation=${transform.saturation}`,
   ];
+  const temporalFilters: string[] = [];
+  const spatialFilters = [
+    ...rotationFilters,
+    `crop=iw*${crop.width}:ih*${crop.height}:iw*${crop.x}:ih*${crop.y}`,
+  ];
   if (unsharpAmount > 0) {
-    filters.push(`unsharp=5:5:${Math.min(2, unsharpAmount).toFixed(3)}:5:5:0`);
+    frameFilters.push(`unsharp=5:5:${Math.min(2, unsharpAmount).toFixed(3)}:5:5:0`);
   }
   if (clarityAmount > 0) {
-    filters.push(`unsharp=7:7:${clarityAmount.toFixed(3)}:7:7:0`);
+    frameFilters.push(`unsharp=7:7:${clarityAmount.toFixed(3)}:7:7:0`);
   }
   if (denoiseAmount > 0) {
     const spatialLuma = (denoiseAmount * 0.06).toFixed(2);
     const spatialChroma = (denoiseAmount * 0.03).toFixed(2);
     const temporalLuma = (denoiseAmount * 0.1).toFixed(2);
     const temporalChroma = (denoiseAmount * 0.05).toFixed(2);
-    filters.push(`hqdn3d=${spatialLuma}:${spatialChroma}:${temporalLuma}:${temporalChroma}`);
+    temporalFilters.push(`hqdn3d=${spatialLuma}:${spatialChroma}:${temporalLuma}:${temporalChroma}`);
   }
+  const scaleFilters = maxDimension
+    ? [`scale=w='min(iw,${maxDimension})':h='min(ih,${maxDimension})':force_original_aspect_ratio=decrease:force_divisible_by=2`]
+    : [];
+  const frameReductionFilters = maxDimension
+    ? [`fps=${frameRate}`, ...scaleFilters, ...temporalFilters]
+    : [...temporalFilters, `fps=${frameRate}`];
   const segmentFilters = recipe.segments.map((segment, index) => (
-    `[0:v]trim=start=${segment.startTime}:end=${segment.endTime},setpts=(PTS-STARTPTS)/${segment.playbackRate},${filters.join(',')},fps=${frameRate}[segment${index}]`
+    `[0:v]${[
+      `trim=start=${segment.startTime}:end=${segment.endTime}`,
+      `setpts=(PTS-STARTPTS)/${segment.playbackRate}`,
+      ...spatialFilters,
+      ...frameReductionFilters,
+      ...frameFilters,
+    ].join(',')}[segment${index}]`
   ));
   const segmentInputs = recipe.segments.map((_segment, index) => `[segment${index}]`).join('');
   segmentFilters.push(`${segmentInputs}concat=n=${recipe.segments.length}:v=1:a=0[joined]`);

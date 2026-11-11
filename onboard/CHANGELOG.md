@@ -4,6 +4,14 @@ This log records product and interface iterations so prior decisions can be unde
 
 ## 2026-11-11
 
+### Bounded export sizes and moved work off discarded frames
+
+- Enforced maximum outputs of 5 MB (5,000,000 bytes) for GIF and 20 MB (20,000,000 bytes) for MP4, preserving the existing quality settings when they fit and trying quality-reduction steps otherwise. Exports that still exceed the cap at the minimum supported profile fail with edit suggestions instead of downloading an oversized file.
+- Replaced the MP4 `ultrafast` preset with `superfast` at the same CRF for more efficient compression, with bitrate and resolution fallbacks for oversized outputs.
+- Sampled GIF frames before per-frame color and sharpening filters while keeping temporal denoise before sampling, avoiding adjustment work on frames that are not exported.
+- Moved edit and crop-dimension validation ahead of FFmpeg initialization and source transfer; added the output ceilings to the format chooser.
+- Rationale: prevent unexpectedly huge exports, reduce wasted per-frame processing without changing retained-frame edits, and surface deterministic export errors before expensive encoding begins.
+
 ### Improved clip-boundary playback and export diagnostics
 
 - Check clip transitions on presented video frames, switching speed at adjacent cuts and seeking to the next retained section before playback runs through removed footage.
