@@ -4,6 +4,20 @@ This log records product and interface iterations so prior decisions can be unde
 
 ## 2026-11-11
 
+### Improved live timeline previews and cut playback
+
+- Throttled timeline scrub seeks to animation frames and flush the final seek on release so the video updates during dragging.
+- Previewed trim-boundary frames continuously while dragging a trim handle, then restored the previous playhead position after release.
+- Avoided unnecessary seeks at contiguous segment boundaries and tolerated small timestamp rounding differences so playback continues smoothly across cuts.
+- Rationale: keep the preview responsive during scrubbing and trimming, and prevent playback from stalling or jumping at adjacent cuts.
+
+### Restored detail adjustments and clarified crop framing
+
+- Added preview filters for sharpness, definition, clarity, and denoise, and made all four controls increase-only like denoise.
+- Added subtle gray timeline ticks at contiguous cut boundaries and slightly darkened removed sections.
+- Kept the full source aspect ratio visible with crop marks; hiding the marks now previews the cropped aspect and shows only the selected crop. Toggling the marks back on restores the full source view.
+- Rationale: make detail adjustments visible again, clarify cut positions, and make the crop preview accurately represent the selected output when crop marks are hidden.
+
 ### Added a timeline timecode
 
 - Added an `HH:MM:SS / HH:MM:SS` readout beside the Timeline heading to show the current playhead position and total source duration.

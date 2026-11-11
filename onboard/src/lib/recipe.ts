@@ -17,6 +17,11 @@ const ADJUSTMENT_NAMES = [
   'clarity',
   'denoise',
 ] as const;
+const INCREASE_ONLY_ADJUSTMENTS = new Set(['sharpness', 'definition', 'clarity', 'denoise']);
+
+export function isIncreaseOnlyAdjustment(name: string) {
+  return INCREASE_ONLY_ADJUSTMENTS.has(name);
+}
 
 export function normalizeEditRecipe(value: unknown, sourceDuration: number): VideoEditRecipe {
   if (!Number.isFinite(sourceDuration) || sourceDuration <= 0) {
@@ -75,7 +80,7 @@ export function normalizeEditRecipe(value: unknown, sourceDuration: number): Vid
   const adjustments: Record<string, number> = {};
   for (const name of ADJUSTMENT_NAMES) {
     const amount = finiteNumber(rawAdjustments[name] ?? 0, name);
-    const minimum = name === 'denoise' ? 0 : -100;
+    const minimum = isIncreaseOnlyAdjustment(name) ? 0 : -100;
     if (amount < minimum || amount > 100) {
       throw new Error(`${name} must be between ${minimum} and 100.`);
     }
@@ -120,7 +125,7 @@ export function buildPreviewTransferTable(adjustments: Record<string, number>) {
 function buildVideoSegmentFilters(recipe: VideoEditRecipe, frameRate: number) {
   const { crop, adjustments, rotation } = recipe;
   const transform = getColorTransform(adjustments);
-  const unsharpAmount = Math.max(0, (adjustments.sharpness + adjustments.definition * 0.7) / 100);
+  const unsharpAmount = (adjustments.sharpness + adjustments.definition * 0.7) / 100;
   const clarityAmount = adjustments.clarity / 100;
   const denoiseAmount = adjustments.denoise;
   const rotationFilters = rotation === 90
@@ -139,7 +144,7 @@ function buildVideoSegmentFilters(recipe: VideoEditRecipe, frameRate: number) {
   if (unsharpAmount > 0) {
     filters.push(`unsharp=5:5:${Math.min(2, unsharpAmount).toFixed(3)}:5:5:0`);
   }
-  if (clarityAmount !== 0) {
+  if (clarityAmount > 0) {
     filters.push(`unsharp=7:7:${clarityAmount.toFixed(3)}:7:7:0`);
   }
   if (denoiseAmount > 0) {

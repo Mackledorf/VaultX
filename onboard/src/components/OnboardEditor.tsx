@@ -1,7 +1,7 @@
 import { type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, Copy, Crop, Download, Link2, List, Pause, Play, RefreshCw, RotateCw, Scissors, Trash2, Upload } from 'lucide-react';
 import { exportGif as exportGifLocally, exportMp4 as exportMp4Locally } from '../lib/editor';
-import { buildPreviewTransferTable, isTimeInSegments, validateSourceDimensions } from '../lib/recipe';
+import { buildPreviewTransferTable, isIncreaseOnlyAdjustment, isTimeInSegments, validateSourceDimensions } from '../lib/recipe';
 import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
 import type { VideoEditRecipe } from '../types';
 
@@ -63,6 +63,8 @@ export function OnboardEditor() {
   const frameDurationRef = useRef(DEFAULT_FRAME_DURATION);
   const globalKeyHandlerRef = useRef<(event: KeyboardEvent) => void>(() => {});
   const arrowScrubRef = useRef<{ direction: -1 | 1; frameId: number } | null>(null);
+  const timelineSeekFrameRef = useRef<number | null>(null);
+  const pendingTimelineSeekRef = useRef<{ time: number; isBoundaryPreview: boolean } | null>(null);
   const initialFrameReadyRef = useRef(false);
   const trimPreviewTimeoutRef = useRef<number | null>(null);
   const savedLookClickTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -159,6 +161,9 @@ export function OnboardEditor() {
     if (trimPreviewTimeoutRef.current !== null) {
       window.clearTimeout(trimPreviewTimeoutRef.current);
     }
+    if (timelineSeekFrameRef.current !== null) {
+      window.cancelAnimationFrame(timelineSeekFrameRef.current);
+    }
   }, []);
 
   useEffect(() => {
@@ -184,8 +189,10 @@ export function OnboardEditor() {
     if (!canvas || !dimensions.width || !dimensions.height) return;
     const updateFrame = () => {
       const bounds = canvas.getBoundingClientRect();
-      const frameWidth = rotation % 180 ? dimensions.height : dimensions.width;
-      const frameHeight = rotation % 180 ? dimensions.width : dimensions.height;
+      const frameWidth = (rotation % 180 ? dimensions.height : dimensions.width)
+        * (cropOverlayVisible ? 1 : crop.width);
+      const frameHeight = (rotation % 180 ? dimensions.width : dimensions.height)
+        * (cropOverlayVisible ? 1 : crop.height);
       const scale = Math.min(bounds.width / frameWidth, bounds.height / frameHeight);
       const width = frameWidth * scale;
       const height = frameHeight * scale;
@@ -200,7 +207,7 @@ export function OnboardEditor() {
     observer.observe(canvas);
     updateFrame();
     return () => observer.disconnect();
-  }, [dimensions, rotation]);
+  }, [crop, cropOverlayVisible, dimensions, rotation]);
 
   useEffect(() => {
     const track = timelineTrackRef.current;
@@ -361,6 +368,21 @@ export function OnboardEditor() {
     }
   }
 
+  function scheduleTrimPreviewRestore(restoreTime: number) {
+    clearTrimPreview();
+    trimPreviewTimeoutRef.current = window.setTimeout(() => {
+      trimPreviewTimeoutRef.current = null;
+      const video = videoRef.current;
+      if (!video) return;
+      video.currentTime = clamp(restoreTime, 0, duration);
+      setCurrentTime(video.currentTime);
+    }, 650);
+  }
+
+  function previewTimelineBoundary(time: number) {
+    scheduleTimelineSeek(clamp(time, 0, duration), true);
+  }
+
   function showTrimPreviewFrame(previewTime: number, restoreTime: number) {
     const video = videoRef.current;
     if (!video) return;
@@ -368,13 +390,7 @@ export function OnboardEditor() {
     video.pause();
     video.currentTime = clamp(previewTime, 0, duration);
     setCurrentTime(video.currentTime);
-    trimPreviewTimeoutRef.current = window.setTimeout(() => {
-      trimPreviewTimeoutRef.current = null;
-      const currentVideo = videoRef.current;
-      if (!currentVideo) return;
-      currentVideo.currentTime = restoreTime;
-      setCurrentTime(restoreTime);
-    }, 650);
+    scheduleTrimPreviewRestore(restoreTime);
   }
 
   function loadVideo(nextFile?: File) {
@@ -550,17 +566,25 @@ export function OnboardEditor() {
     const video = videoRef.current;
     if (!video || playheadHiddenAfterTrimRef.current) return;
     const time = video.currentTime;
-    const segmentIndex = segments.findIndex((segment) => time >= segment.startTime && time < segment.endTime);
+    const boundaryTolerance = Math.min(0.005, frameDurationRef.current / 4);
+    let segmentIndex = segments.findIndex((segment) => time >= segment.startTime && time < segment.endTime);
+    if (segmentIndex < 0) {
+      segmentIndex = segments.findIndex((segment, index) => (
+        index > 0
+        && Math.abs(time - segment.startTime) <= boundaryTolerance
+        && Math.abs(segments[index - 1].endTime - segment.startTime) <= boundaryTolerance
+      ));
+    }
     if (segmentIndex >= 0) {
       if (segmentIndex !== selectedSegmentIndex) setSelectedSegmentIndex(segmentIndex);
       if (video.playbackRate !== segments[segmentIndex].playbackRate) {
         video.playbackRate = segments[segmentIndex].playbackRate;
       }
     }
-    if (!video.paused && segmentIndex >= 0 && time >= segments[segmentIndex].endTime - frameDurationRef.current) {
+    if (!video.paused && segmentIndex >= 0 && time >= segments[segmentIndex].endTime - boundaryTolerance) {
       const currentSegment = segments[segmentIndex];
       const followingSegment = segments[segmentIndex + 1];
-      if (followingSegment && followingSegment.startTime <= currentSegment.endTime + 0.001) {
+      if (followingSegment && followingSegment.startTime <= currentSegment.endTime + boundaryTolerance) {
         setCurrentTime(time);
         return;
       }
@@ -573,7 +597,7 @@ export function OnboardEditor() {
       return;
     }
     if (!video.paused && segmentIndex === -1) {
-      const nextSegment = segments.find((segment) => segment.startTime > time) ?? segments[0];
+      const nextSegment = segments.find((segment) => segment.startTime > time + boundaryTolerance) ?? segments[0];
       if (nextSegment) {
         video.currentTime = nextSegment.startTime;
         video.playbackRate = nextSegment.playbackRate;
@@ -647,6 +671,47 @@ export function OnboardEditor() {
       setSelectedSegmentIndex(activeIndex);
     }
     setCurrentTime(resolvedTime);
+  }
+
+  function flushTimelineSeek() {
+    if (timelineSeekFrameRef.current !== null) {
+      window.cancelAnimationFrame(timelineSeekFrameRef.current);
+      timelineSeekFrameRef.current = null;
+    }
+    const pendingSeek = pendingTimelineSeekRef.current;
+    pendingTimelineSeekRef.current = null;
+    if (!pendingSeek) return;
+    if (pendingSeek.isBoundaryPreview) {
+      const video = videoRef.current;
+      if (!video) return;
+      video.currentTime = clamp(pendingSeek.time, 0, duration);
+      setCurrentTime(video.currentTime);
+    } else {
+      seekVideo(pendingSeek.time);
+    }
+  }
+
+  function previewTimelineTime(value: number) {
+    scheduleTimelineSeek(value, false);
+  }
+
+  function scheduleTimelineSeek(time: number, isBoundaryPreview: boolean) {
+    pendingTimelineSeekRef.current = { time, isBoundaryPreview };
+    if (timelineSeekFrameRef.current !== null) return;
+    timelineSeekFrameRef.current = window.requestAnimationFrame(() => {
+      timelineSeekFrameRef.current = null;
+      const pendingSeek = pendingTimelineSeekRef.current;
+      pendingTimelineSeekRef.current = null;
+      if (!pendingSeek) return;
+      if (pendingSeek.isBoundaryPreview) {
+        const video = videoRef.current;
+        if (!video) return;
+        video.currentTime = clamp(pendingSeek.time, 0, duration);
+        setCurrentTime(video.currentTime);
+      } else {
+        seekVideo(pendingSeek.time);
+      }
+    });
   }
 
   function scrubByFrame(direction: -1 | 1) {
@@ -725,6 +790,7 @@ export function OnboardEditor() {
       };
       setSelectedSegmentIndex(segmentIndex);
       videoRef.current?.pause();
+      clearTrimPreview();
       setShowCutTooltip(false);
       return;
     }
@@ -754,7 +820,7 @@ export function OnboardEditor() {
     const drag = timelineDragRef.current;
     if (!drag) return;
     if (drag.type === 'scrub') {
-      seekVideo(getTimelineTime(event));
+      previewTimelineTime(getTimelineTime(event));
       return;
     }
     const index = drag.index;
@@ -782,22 +848,22 @@ export function OnboardEditor() {
       setPlayheadHiddenAfterTrim(false);
     }
     setSegments(updated);
+    const previewTime = drag.edge === 'startTime'
+      ? updated[index].startTime
+      : Math.max(updated[index].startTime, updated[index].endTime - frameDurationRef.current);
+    previewTimelineBoundary(previewTime);
   }
 
   function onTimelinePointerUp() {
     const drag = timelineDragRef.current;
     if (drag?.type === 'trim') {
-      const originalSegment = drag.segments[drag.index];
-      const currentSegment = segments[drag.index];
-      if (
-        originalSegment && currentSegment
-        && (originalSegment.startTime !== currentSegment.startTime || originalSegment.endTime !== currentSegment.endTime)
-      ) {
-        const previewTime = drag.edge === 'startTime'
-          ? currentSegment.startTime
-          : Math.max(currentSegment.startTime, currentSegment.endTime - frameDurationRef.current);
-        showTrimPreviewFrame(previewTime, drag.restoreTime);
-      }
+      flushTimelineSeek();
+      const changed = drag.segments.some((segment, index) => (
+        segment.startTime !== segments[index]?.startTime || segment.endTime !== segments[index]?.endTime
+      ));
+      if (changed) scheduleTrimPreviewRestore(drag.restoreTime);
+    } else if (drag?.type === 'scrub') {
+      flushTimelineSeek();
     }
     timelineDragRef.current = null;
     finishEditGesture();
@@ -822,7 +888,6 @@ export function OnboardEditor() {
     }
     const changed = updated[index].startTime !== segment.startTime || updated[index].endTime !== segment.endTime;
     if (changed) recordEdit();
-    videoRef.current?.pause();
     setSegments(updated);
     setSelectedSegmentIndex(index);
     setShowCutTooltip(false);
@@ -1163,11 +1228,32 @@ export function OnboardEditor() {
     .map((value) => (value / 255).toFixed(6))
     .join(' ');
   const previewSaturation = Math.max(0, 1 + (adjustments.saturation + adjustments.vibrance * 0.6) / 100);
+  const previewSharpness = Math.min(2, (adjustments.sharpness + adjustments.definition * 0.7) / 100);
+  const previewClarity = adjustments.clarity / 100;
+  const cropScaleX = cropOverlayVisible ? 1 : 1 / crop.width;
+  const cropScaleY = cropOverlayVisible ? 1 : 1 / crop.height;
+  const orientedAspectRatio = rotated ? dimensions.height / dimensions.width : dimensions.width / dimensions.height;
+  const cropOffsetX = cropOverlayVisible ? 0 : (0.5 - crop.x) / crop.width - 0.5;
+  const cropOffsetY = cropOverlayVisible ? 0 : (0.5 - crop.y) / crop.height - 0.5;
+  let videoOffsetX = cropOffsetX;
+  let videoOffsetY = cropOffsetY;
+  if (rotation === 90) {
+    videoOffsetX = cropOffsetY / orientedAspectRatio;
+    videoOffsetY = -cropOffsetX * orientedAspectRatio;
+  } else if (rotation === 180) {
+    videoOffsetX = -cropOffsetX;
+    videoOffsetY = -cropOffsetY;
+  } else if (rotation === 270) {
+    videoOffsetX = -cropOffsetY / orientedAspectRatio;
+    videoOffsetY = cropOffsetX * orientedAspectRatio;
+  }
   const canvasStyle: CSSProperties = {};
   const videoStyle: CSSProperties = {
-    filter: `url(#onboard-adjustments) saturate(${previewSaturation}) blur(${adjustments.denoise * 0.004}px)`,
-    width: rotated ? `${(dimensions.width / dimensions.height) * 100}%` : '100%',
-    height: rotated ? `${(dimensions.height / dimensions.width) * 100}%` : '100%',
+    filter: `url(#onboard-adjustments) saturate(${previewSaturation})`,
+    width: `${(rotated ? dimensions.width / dimensions.height : 1) * cropScaleX * 100}%`,
+    height: `${(rotated ? dimensions.height / dimensions.width : 1) * cropScaleY * 100}%`,
+    left: `${(0.5 + videoOffsetX) * 100}%`,
+    top: `${(0.5 + videoOffsetY) * 100}%`,
     transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
   };
   const cropStyle: CSSProperties = {
@@ -1177,6 +1263,9 @@ export function OnboardEditor() {
     height: `${crop.height * 100}%`,
   };
   const excludedRanges: Array<{ startTime: number; endTime: number }> = [];
+  const cutMarks = segments.slice(1).flatMap((segment, index) => (
+    Math.abs(segments[index].endTime - segment.startTime) < 0.001 ? [segment.startTime] : []
+  ));
   const playheadSegmentIndex = segments.findIndex((segment) => isTimeInSegments(currentTime, [segment]));
   const activeTimelineSegmentIndex = playheadSegmentIndex >= 0 ? playheadSegmentIndex : selectedSegmentIndex;
   if (duration > 0) {
@@ -1192,7 +1281,7 @@ export function OnboardEditor() {
     }
   }
   function adjustmentSlider(key: string, label: string) {
-    const min = key === 'denoise' ? 0 : -100;
+    const min = isIncreaseOnlyAdjustment(key) ? 0 : -100;
     const value = adjustments[key];
     const zeroPosition = ((0 - min) / (100 - min)) * 100;
     const valuePosition = ((value - min) / (100 - min)) * 100;
@@ -1450,12 +1539,35 @@ export function OnboardEditor() {
             onDrop={dropVideo}
           >
             <svg className="preview-filter-defs" aria-hidden="true">
-              <filter id="onboard-adjustments" colorInterpolationFilters="sRGB">
-                <feComponentTransfer>
+              <filter id="onboard-adjustments" x="-20%" y="-20%" width="140%" height="140%" colorInterpolationFilters="sRGB">
+                <feComponentTransfer result="color-adjusted">
                   <feFuncR type="table" tableValues={previewTransferTable} />
                   <feFuncG type="table" tableValues={previewTransferTable} />
                   <feFuncB type="table" tableValues={previewTransferTable} />
                 </feComponentTransfer>
+                <feGaussianBlur in="color-adjusted" stdDeviation="1.5" result="sharpness-blur" />
+                <feComposite
+                  in="color-adjusted"
+                  in2="sharpness-blur"
+                  operator="arithmetic"
+                  k1="0"
+                  k2={1 + previewSharpness}
+                  k3={-previewSharpness}
+                  k4="0"
+                  result="sharpened"
+                />
+                <feGaussianBlur in="sharpened" stdDeviation="3.5" result="clarity-blur" />
+                <feComposite
+                  in="sharpened"
+                  in2="clarity-blur"
+                  operator="arithmetic"
+                  k1="0"
+                  k2={1 + previewClarity}
+                  k3={-previewClarity}
+                  k4="0"
+                  result="clarified"
+                />
+                <feGaussianBlur in="clarified" stdDeviation={adjustments.denoise * 0.02} />
               </filter>
             </svg>
             {!file ? (
@@ -1492,7 +1604,7 @@ export function OnboardEditor() {
                 )}
               </div>
             ) : (
-              <div className="onboard-video-frame" style={videoFrameStyle} onPointerMove={updateCrop} onPointerUp={clearCropDrag} onPointerCancel={clearCropDrag}>
+              <div className={`onboard-video-frame${cropOverlayVisible ? '' : ' cropped'}`} style={videoFrameStyle} onPointerMove={updateCrop} onPointerUp={clearCropDrag} onPointerCancel={clearCropDrag}>
                 <video
                   ref={videoRef}
                   src={previewUrl || undefined}
@@ -1686,6 +1798,14 @@ export function OnboardEditor() {
                 left: `${(range.startTime / duration) * 100}%`,
                 width: `${((range.endTime - range.startTime) / duration) * 100}%`,
               }}
+            />
+          ))}
+          {cutMarks.map((time) => (
+            <span
+              key={`cut-${time}`}
+              className="timeline-cut-mark"
+              aria-hidden="true"
+              style={{ left: `${(time / duration) * 100}%` }}
             />
           ))}
           {segments.map((segment, index) => (

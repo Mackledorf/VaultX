@@ -183,6 +183,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 @keyframes remote-import-progress { from { transform: translateX(0); } to { transform: translateX(185%); } }
 .preview-filter-defs { position: absolute; width: 0; height: 0; overflow: hidden; }
 .onboard-video-frame { position: absolute; overflow: visible; touch-action: none; }
+.onboard-video-frame.cropped { overflow: hidden; }
 .onboard-video { position: absolute; top: 50%; left: 50%; display: block; width: 100%; height: 100%; object-fit: fill; cursor: pointer; }
 .onboard-video:focus-visible { outline: none; }
 .crop-selection { position: absolute; z-index: 2; border: 1px solid rgba(255,255,255,.92); box-shadow: 0 0 0 999px rgba(0,0,0,.42); pointer-events: none; }
@@ -260,7 +261,11 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .timeline-thumbnails { position: absolute; z-index: 0; inset: 0; display: flex; overflow: hidden; pointer-events: none; }
 .timeline-thumbnails::after { position: absolute; inset: 0; background: rgba(0,0,0,.5); content: ""; }
 .timeline-thumbnails img { display: block; width: auto; height: 100%; flex: 0 0 auto; object-fit: contain; }
-.timeline-excluded { position: absolute; z-index: 1; top: 0; bottom: 0; background: rgba(15,16,17,.58); pointer-events: none; }
+.timeline-excluded { position: absolute; z-index: 1; top: 0; bottom: 0; background: rgba(15,16,17,.64); pointer-events: none; }
+.timeline-cut-mark { position: absolute; z-index: 3; top: -1px; bottom: -1px; width: 1px; transform: translateX(-50%); background: rgba(193,198,200,.78); pointer-events: none; }
+.timeline-cut-mark::before, .timeline-cut-mark::after { position: absolute; left: -3px; width: 7px; height: 2px; background: #c2c6c8; content: ""; }
+.timeline-cut-mark::before { top: 0; }
+.timeline-cut-mark::after { bottom: 0; }
 .timeline-segment { position: absolute; z-index: 2; top: 0; bottom: 0; min-width: 3px; background: transparent; pointer-events: auto; }
 .timeline-segment.selected { z-index: 6; }
 .timeline-segment.active .segment-label { color: #eafff8; }

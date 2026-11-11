@@ -49,25 +49,45 @@ test('rejects invalid sections, unsafe crop bounds, and playback rates outside 0
   }, 10).segments[0].playbackRate, 0.7);
 });
 
+test('requires detail adjustments to be increase-only', () => {
+  for (const name of ['sharpness', 'definition', 'clarity', 'denoise']) {
+    assert.throws(() => normalizeEditRecipe({
+      ...baseRecipe,
+      adjustments: { ...baseRecipe.adjustments, [name]: -10 },
+    }, 10), new RegExp(`${name} must be between 0 and 100`));
+  }
+});
+
 test('builds a GIF filter with cuts, rotations, crop, adjustments, and palette output', () => {
   const recipe = normalizeEditRecipe({
     ...baseRecipe,
     segments: [{ startTime: 0, endTime: 2, playbackRate: 2 }, { startTime: 4, endTime: 8, playbackRate: 1 }],
     rotation: 90,
     crop: { x: 0.1, y: 0.2, width: 0.7, height: 0.6 },
-    adjustments: { ...baseRecipe.adjustments, denoise: 10, sharpness: 30 },
+    adjustments: { ...baseRecipe.adjustments, denoise: 10, sharpness: 30, definition: 20 },
   }, 10);
   const filter = buildGifFilter(recipe);
 
   assert.match(filter, /transpose=clock/);
   assert.match(filter, /crop=iw\*0\.7:ih\*0\.6:iw\*0\.1:ih\*0\.2/);
   assert.match(filter, /hqdn3d=/);
+  assert.match(filter, /unsharp=5:5:0\.440:5:5:0/);
   assert.match(filter, /lutrgb=r='/);
   assert.match(filter, /eq=saturation=1/);
   assert.match(filter, /concat=n=2/);
   assert.match(filter, /setpts=\(PTS-STARTPTS\)\/2/);
   assert.match(filter, /setpts=\(PTS-STARTPTS\)\/1/);
   assert.match(filter, /paletteuse=dither=sierra2_4a/);
+});
+
+test('applies clarity as an increase-only unsharp filter in GIF and MP4 exports', () => {
+  const recipe = normalizeEditRecipe({
+    ...baseRecipe,
+    adjustments: { ...baseRecipe.adjustments, clarity: 40 },
+  }, 10);
+
+  assert.match(buildGifFilter(recipe), /unsharp=7:7:0\.400:7:7:0/);
+  assert.match(buildMp4Filter(recipe), /unsharp=7:7:0\.400:7:7:0/);
 });
 
 test('uses the same tonal transfer for the preview and encoded video', () => {
@@ -93,7 +113,7 @@ test('builds an MP4 filter with edits, 30fps output, and browser-compatible dime
     segments: [{ startTime: 0, endTime: 2, playbackRate: 1.5 }, { startTime: 4, endTime: 8, playbackRate: 1 }],
     rotation: 90,
     crop: { x: 0.1, y: 0.2, width: 0.7, height: 0.6 },
-    adjustments: { ...baseRecipe.adjustments, denoise: 10, sharpness: 30 },
+    adjustments: { ...baseRecipe.adjustments, denoise: 10, sharpness: 30, definition: 20 },
   }, 10);
   const filter = buildMp4Filter(recipe);
 
@@ -102,6 +122,7 @@ test('builds an MP4 filter with edits, 30fps output, and browser-compatible dime
   assert.match(filter, /setpts=\(PTS-STARTPTS\)\/1\.5/);
   assert.match(filter, /fps=30\[segment0\]/);
   assert.match(filter, /concat=n=2:v=1:a=0\[joined\]/);
+  assert.match(filter, /unsharp=5:5:0\.440:5:5:0/);
   assert.match(filter, /scale=trunc\(iw\/2\)\*2:trunc\(ih\/2\)\*2,setsar=1\[out\]/);
 });
 
