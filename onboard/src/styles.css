@@ -155,6 +155,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .source-url-progress { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
 .crop-presets { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-2); }
 .crop-section { row-gap: var(--space-2); }
+.crop-actions { display: grid; grid-template-columns: minmax(0, 1fr) 40px; gap: var(--space-2); }
+.crop-actions .tool-button { width: 100%; }
+.crop-invert-button { justify-content: center; padding: 0; }
 .crop-preset { min-width: 0; min-height: 40px; border: 1px solid var(--line); border-radius: var(--radius-control); color: var(--text-control); background: #2a2d2f; padding: 0 var(--space-1); font-size: var(--type-control); font-weight: var(--weight-medium); white-space: nowrap; }
 .crop-preset:hover:not(:disabled) { border-color: var(--line-strong); color: #fff; }
 .crop-preset.active { border-color: #548d7d; color: #ecfff8; background: #34574d; }
@@ -200,6 +203,14 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .crop-handle.sw::before { bottom: 0; left: 0; border-bottom: 3px solid #fff; border-left: 3px solid #fff; }
 .crop-handle.se { right: -1px; bottom: -1px; cursor: nwse-resize; }
 .crop-handle.se::before { right: 0; bottom: 0; border-right: 3px solid #fff; border-bottom: 3px solid #fff; }
+.crop-handle.n, .crop-handle.s { left: 25%; width: 50%; height: 20px; cursor: ns-resize; }
+.crop-handle.n { top: -10px; }
+.crop-handle.s { bottom: -10px; }
+.crop-handle.e, .crop-handle.w { top: 25%; width: 20px; height: 50%; cursor: ew-resize; }
+.crop-handle.e { right: -10px; }
+.crop-handle.w { left: -10px; }
+.crop-handle.n::before, .crop-handle.s::before { top: 9px; left: 50%; width: 20px; height: 2px; background: #fff; transform: translateX(-50%); }
+.crop-handle.e::before, .crop-handle.w::before { top: 50%; left: 9px; width: 2px; height: 20px; background: #fff; transform: translateY(-50%); }
 .transport-button { position: absolute; top: 50%; left: 50%; display: grid; width: 40px; height: 40px; place-items: center; transform: translate(-50%, -50%); border: 0; border-radius: var(--radius-control); color: #c2c8c8; background: transparent; padding: 0; }
 .transport-button:hover:not(:disabled) { background: #363a3c; }
 .inline-error { margin: 0; border-top: 1px solid #6f3434; color: #ffc1bd; background: #392424; padding: var(--space-2) var(--space-3); font-size: var(--type-control); }

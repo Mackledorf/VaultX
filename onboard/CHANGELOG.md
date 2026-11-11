@@ -4,6 +4,13 @@ This log records product and interface iterations so prior decisions can be unde
 
 ## 2026-11-11
 
+### Stabilized crop dragging and added inverse aspect presets
+
+- Fixed freeform crop deltas to use pointer movement from drag start and captured pointer input on the stable video frame rather than the moving handle.
+- Added draggable handles to all four crop edges in addition to the corners.
+- Added a crop control to switch a selected aspect preset to its reciprocal orientation, such as 16:9 to 9:16.
+- Rationale: let users adjust any crop boundary precisely without jitter and quickly switch between landscape and portrait output.
+
 ### Improved live timeline previews and cut playback
 
 - Throttled timeline scrub seeks to animation frames and flush the final seek on release so the video updates during dragging.

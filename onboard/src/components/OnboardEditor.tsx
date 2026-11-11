@@ -1,5 +1,5 @@
 import { type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown, Copy, Crop, Download, Link2, List, Pause, Play, RefreshCw, RotateCw, Scissors, Trash2, Upload } from 'lucide-react';
+import { ArrowDownUp, Check, ChevronDown, Copy, Crop, Download, Link2, List, Pause, Play, RefreshCw, RotateCw, Scissors, Trash2, Upload } from 'lucide-react';
 import { exportGif as exportGifLocally, exportMp4 as exportMp4Locally } from '../lib/editor';
 import { buildPreviewTransferTable, isIncreaseOnlyAdjustment, isTimeInSegments, validateSourceDimensions } from '../lib/recipe';
 import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
@@ -32,7 +32,7 @@ const ADJUSTMENTS = [
   ['denoise', 'Denoise'],
 ] as const;
 
-type CropCorner = 'nw' | 'ne' | 'sw' | 'se';
+type CropHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 type CropRect = VideoEditRecipe['crop'];
 type VideoSegment = VideoEditRecipe['segments'][number];
 type RemoteSourceProgressState = RemoteSourceProgress & { fileName: string };
@@ -59,7 +59,13 @@ export function OnboardEditor() {
   const exportController = useRef<AbortController | null>(null);
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const remoteImportController = useRef<AbortController | null>(null);
-  const dragRef = useRef<{ corner: CropCorner; crop: CropRect; rect: DOMRect } | null>(null);
+  const dragRef = useRef<{
+    handle: CropHandle;
+    crop: CropRect;
+    rect: DOMRect;
+    startX: number;
+    startY: number;
+  } | null>(null);
   const frameDurationRef = useRef(DEFAULT_FRAME_DURATION);
   const globalKeyHandlerRef = useRef<(event: KeyboardEvent) => void>(() => {});
   const arrowScrubRef = useRef<{ direction: -1 | 1; frameId: number } | null>(null);
@@ -513,6 +519,15 @@ export function OnboardEditor() {
     recordEdit();
     setCropAspectRatio(aspectRatio);
     setCrop(cropForAspectRatio(aspectRatio));
+    setCropOverlayVisible(true);
+  }
+
+  function invertCropAspect() {
+    if (cropAspectRatio === null || cropAspectRatio === 1) return;
+    const invertedAspectRatio = 1 / cropAspectRatio;
+    recordEdit();
+    setCropAspectRatio(invertedAspectRatio);
+    setCrop(cropForAspectRatio(invertedAspectRatio));
     setCropOverlayVisible(true);
   }
 
@@ -1103,20 +1118,20 @@ export function OnboardEditor() {
   function updateCrop(event: PointerEvent<HTMLDivElement>) {
     const drag = dragRef.current;
     if (!drag) return;
-    const dx = (event.clientX - drag.rect.left) / drag.rect.width;
-    const dy = (event.clientY - drag.rect.top) / drag.rect.height;
+    const dx = (event.clientX - drag.startX) / drag.rect.width;
+    const dy = (event.clientY - drag.startY) / drag.rect.height;
     const { x, y, width, height } = drag.crop;
     let next = { ...drag.crop };
-    if (drag.corner.includes('w')) {
+    if (drag.handle.includes('w')) {
       const left = clamp(x + dx, 0, x + width - MIN_CROP_SIZE);
       next = { ...next, x: left, width: x + width - left };
     }
-    if (drag.corner.includes('e')) next.width = clamp(width + dx, MIN_CROP_SIZE, 1 - x);
-    if (drag.corner.includes('n')) {
+    if (drag.handle.includes('e')) next.width = clamp(width + dx, MIN_CROP_SIZE, 1 - x);
+    if (drag.handle.includes('n')) {
       const top = clamp(y + dy, 0, y + height - MIN_CROP_SIZE);
       next = { ...next, y: top, height: y + height - top };
     }
-    if (drag.corner.includes('s')) next.height = clamp(height + dy, MIN_CROP_SIZE, 1 - y);
+    if (drag.handle.includes('s')) next.height = clamp(height + dy, MIN_CROP_SIZE, 1 - y);
     if (next.x === crop.x && next.y === crop.y && next.width === crop.width && next.height === crop.height) return;
     recordEdit();
     setCropAspectRatio(null);
@@ -1426,18 +1441,30 @@ export function OnboardEditor() {
                 </button>
               ))}
             </div>
-            <button
-              className="tool-button"
-              type="button"
-              disabled={!file || (crop.x === 0 && crop.y === 0 && crop.width === 1 && crop.height === 1 && cropAspectRatio === null)}
-              onClick={() => {
-                recordEdit();
-                setCrop({ x: 0, y: 0, width: 1, height: 1 });
-                setCropAspectRatio(null);
-              }}
-            >
-              <Crop size={15} /> Reset crop
-            </button>
+            <div className="crop-actions">
+              <button
+                className="tool-button"
+                type="button"
+                disabled={!file || (crop.x === 0 && crop.y === 0 && crop.width === 1 && crop.height === 1 && cropAspectRatio === null)}
+                onClick={() => {
+                  recordEdit();
+                  setCrop({ x: 0, y: 0, width: 1, height: 1 });
+                  setCropAspectRatio(null);
+                }}
+              >
+                <Crop size={15} /> Reset crop
+              </button>
+              <button
+                className="tool-button crop-invert-button"
+                type="button"
+                aria-label={`Switch crop to ${cropAspectRatio ? formatAspectRatio(1 / cropAspectRatio) : 'inverse aspect ratio'}`}
+                title="Switch between landscape and portrait crop"
+                disabled={!file || !cropAspectRatio || cropAspectRatio === 1}
+                onClick={invertCropAspect}
+              >
+                <ArrowDownUp size={15} />
+              </button>
+            </div>
           </section>
 
           <section className="tool-section speed-section">
@@ -1623,20 +1650,27 @@ export function OnboardEditor() {
                   onEnded={onVideoEnded}
                 />
                 {cropOverlayVisible && (
-                  <div className="crop-selection" style={cropStyle} aria-label="Adjust crop by dragging a corner">
-                    {(['nw', 'ne', 'sw', 'se'] as CropCorner[]).map((corner) => (
+                  <div className="crop-selection" style={cropStyle} aria-label="Adjust crop by dragging a corner or edge">
+                    {(['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'] as CropHandle[]).map((handle) => (
                       <button
-                        key={corner}
+                        key={handle}
                         type="button"
-                        className={`crop-handle ${corner}`}
-                        aria-label={`Adjust ${corner} crop corner`}
+                        className={`crop-handle ${handle}`}
+                        aria-label={`Adjust ${handle} crop ${handle.length === 2 ? 'corner' : 'edge'}`}
                         onPointerDown={(event) => {
                           const frame = event.currentTarget.parentElement?.parentElement;
                           if (!frame) return;
                           event.preventDefault();
-                          event.currentTarget.setPointerCapture(event.pointerId);
+                          event.stopPropagation();
+                          frame.setPointerCapture(event.pointerId);
                           beginEditGesture();
-                          dragRef.current = { corner, crop: { ...crop }, rect: frame.getBoundingClientRect() };
+                          dragRef.current = {
+                            handle,
+                            crop: { ...crop },
+                            rect: frame.getBoundingClientRect(),
+                            startX: event.clientX,
+                            startY: event.clientY,
+                          };
                         }}
                       />
                     ))}
@@ -2042,6 +2076,17 @@ function createSavedLookThumbnail(
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function formatAspectRatio(aspectRatio: number) {
+  const knownRatios = [
+    [1, '1:1'],
+    [3 / 4, '3:4'],
+    [4 / 3, '4:3'],
+    [16 / 9, '16:9'],
+    [9 / 16, '9:16'],
+  ] as const;
+  return knownRatios.find(([ratio]) => Math.abs(ratio - aspectRatio) < 0.001)?.[1] ?? 'custom';
 }
 
 function formatTime(seconds: number) {

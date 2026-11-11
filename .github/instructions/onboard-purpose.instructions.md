@@ -104,6 +104,8 @@ Onboard is not a drive, media library, or place to upload and save source files 
 - Allow the user to rotate the video.
 - Support dynamic, freeform crop/aspect-ratio adjustment rather than requiring a fixed crop preset.
 - Show the full uncropped source aspect ratio while crop marks are visible. When crop marks are hidden, fit and clip the preview to the selected crop's aspect ratio; toggling the marks back on restores the full source view and crop overlay.
+- Allow freeform crop resizing from all four corners and all four edges. Keep drag coordinates relative to the pointer-down position and capture the pointer on a stable frame element so crop handles do not jump as the selection changes.
+- Add an inverse-aspect control beside Reset crop to switch selected presets between landscape and portrait (for example, 16:9 and 9:16).
 
 ### Lighting and detail adjustments
 
