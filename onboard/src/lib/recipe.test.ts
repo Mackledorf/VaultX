@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildGifFilter, buildMp4Filter, isTimeInSegments, normalizeEditRecipe, validateSourceDimensions } from './recipe';
+import { buildGifFilter, buildMp4Filter, buildPreviewTransferTable, isTimeInSegments, normalizeEditRecipe, validateSourceDimensions } from './recipe';
 import type { VideoEditRecipe } from '../types';
 
 const baseRecipe: VideoEditRecipe = {
@@ -62,10 +62,29 @@ test('builds a GIF filter with cuts, rotations, crop, adjustments, and palette o
   assert.match(filter, /transpose=clock/);
   assert.match(filter, /crop=iw\*0\.7:ih\*0\.6:iw\*0\.1:ih\*0\.2/);
   assert.match(filter, /hqdn3d=/);
+  assert.match(filter, /lutrgb=r='/);
+  assert.match(filter, /eq=saturation=1/);
   assert.match(filter, /concat=n=2/);
   assert.match(filter, /setpts=\(PTS-STARTPTS\)\/2/);
   assert.match(filter, /setpts=\(PTS-STARTPTS\)\/1/);
   assert.match(filter, /paletteuse=dither=sierra2_4a/);
+});
+
+test('uses the same tonal transfer for the preview and encoded video', () => {
+  const identity = buildPreviewTransferTable(baseRecipe.adjustments);
+  assert.equal(identity.length, 256);
+  assert.equal(identity[0], 0);
+  assert.equal(identity[128], 128);
+  assert.equal(identity[255], 255);
+
+  const adjustments = { ...baseRecipe.adjustments, exposure: 40, shadows: 30, highlights: -20 };
+  const transfer = buildPreviewTransferTable(adjustments);
+  const recipe = normalizeEditRecipe({ ...baseRecipe, adjustments }, 10);
+  const filter = buildMp4Filter(recipe);
+
+  assert.notDeepEqual(transfer, identity);
+  assert.match(filter, /lutrgb=r='/);
+  assert.match(filter, /pow\(/);
 });
 
 test('builds an MP4 filter with edits, 30fps output, and browser-compatible dimensions', () => {

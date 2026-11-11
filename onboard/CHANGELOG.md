@@ -230,3 +230,27 @@ This log records product and interface iterations so prior decisions can be unde
 - Added an independent GitHub Pages deployment that builds only `onboard/` and publishes it at `https://mackledorf.github.io/VaultX/`; the app remains separate from VaultX's server, API, and storage.
 - Documented the direct app link and the separate deployment path in the repository and Onboard READMEs.
 - Rationale: mark the first complete working build and make the editor directly accessible from the repository without requiring users to open VaultX.
+
+## 2026-11-11
+
+### Fixed preview, export, and timeline editing behavior
+
+- Unified tonal adjustment math between the canvas preview and encoded GIF/MP4 output, including exposure, brilliance, highlights, shadows, contrast, and brightness.
+- Added Ctrl/Cmd+Z undo and Ctrl/Cmd+Shift+Z redo for edits; changing edits now invalidates an older export so the updated version can be encoded again.
+- Highlighted the timeline section under the playhead independently of the section selected for trimming.
+- Briefly previewed the adjusted trim boundary before returning to the previous playhead frame.
+- Kept playback continuous across adjacent cuts, skipped removed gaps during playback, and looped from the last kept section to the first.
+- Rationale: make the canvas reflect exported tonal edits and keep iterative editing, playback, and export responsive after the first encode.
+
+### Added fast keyboard scrubbing and saved adjustment looks
+
+- Holding Left or Right Arrow now scrubs at four times the active section's playback rate; releasing the key stops scrubbing.
+- Added a save-frame action that captures the current preview with its adjustment combination and a toggleable gallery for applying saved combinations.
+- Kept saved looks in the current editor session and made the gallery scroll when its saved frames exceed the panel height.
+- Rationale: speed up timeline navigation and make adjustment combinations reusable without storing source media or adding persistent storage.
+
+### Added timeline frame previews
+
+- Removed the green active-section bar at the top of the timeline.
+- Replaced the gray-only timeline track with sampled video-frame previews, cropped and rotated to match the current output while preserving their aspect ratio.
+- Rationale: make footage easier to recognize while scrubbing without distorting its frames or changing trim and excluded-range behavior.

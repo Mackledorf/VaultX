@@ -29,7 +29,7 @@ applyTo: "onboard/**"
 - Disable and visually mute all adjustment sliders until a source video is loaded, matching the disabled treatment of other editor controls.
 - Provide a single reset action for returning all adjustments to zero. Align the header's right-side action with the timeline's right inset while keeping the wordmark's left inset unchanged.
 - Center primary playback in the timeline header, directly above its track.
-- Keep the timeline's empty-state background unchanged before media is loaded. With media loaded, show trim handles at kept-section boundaries, leave kept footage visually clear of filled bars, and dim excluded ranges rather than marking kept ranges green. Use a neutral gray vertical playhead with triangular ends; section labels show playback rate without numbering.
+- Keep the timeline's empty-state background unchanged before media is loaded. With media loaded, show aspect-ratio-preserving frame previews across the track, trim handles at kept-section boundaries, leave kept footage visually clear of filled bars, and dim excluded ranges rather than marking kept ranges green. Use a neutral gray vertical playhead with triangular ends; section labels show playback rate without numbering.
 - If a requested change appears to conflict with this document, explain the conflict and resolve the product direction before changing site behavior.
 - Do not impose arbitrary file-size or video-duration product limits. Onboard is an ephemeral tool: media is processed for the current edit, not uploaded to a library or retained for later use. Be transparent about actual browser or format constraints rather than silently dropping or truncating media.
 
@@ -82,7 +82,7 @@ Onboard is not a drive, media library, or place to upload and save source files 
 
 - Scrub through the footage in the timeline.
 - Drag the playhead to scrub; clicking elsewhere on the timeline must not seek.
-- With the timeline focused, Left and Right Arrow move the playhead by one source video frame.
+- With the timeline focused, Left and Right Arrow move the playhead by one source video frame; holding either key scrubs at four times the active section's playback rate.
 - Clicking the video toggles the crop-mark overlay without changing playback. Pressing Space while the video is focused plays or pauses it.
 - Crop presets always show the crop-mark overlay.
 - After timeline trimming, hide the playhead, pause playback, and ignore video time updates until playback resumes. Park at the first kept section; the playhead returns only when playback resumes from there.
@@ -111,4 +111,4 @@ Keep familiar photo-editor adjustments available directly in the workspace, incl
 - Denoise and sharpening
 - Clarity
 
-Adjustments should update the preview and be applied to the exported GIF. Keep the labels and controls understandable without requiring users to search through nested panels.
+Adjustments should update the preview and be applied to the exported GIF. Let users save in-session frame previews with their adjustment combinations and switch among them in a scrollable gallery without persisting source media or saved looks. Keep the labels and controls understandable without requiring users to search through nested panels.

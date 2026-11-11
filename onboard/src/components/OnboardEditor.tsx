@@ -1,7 +1,7 @@
 import { type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown, Crop, Download, Link2, Pause, Play, RefreshCw, RotateCw, Scissors, Upload } from 'lucide-react';
+import { Check, ChevronDown, Copy, Crop, Download, Link2, List, Pause, Play, RefreshCw, RotateCw, Scissors, Upload } from 'lucide-react';
 import { exportGif as exportGifLocally, exportMp4 as exportMp4Locally } from '../lib/editor';
-import { isTimeInSegments, validateSourceDimensions } from '../lib/recipe';
+import { buildPreviewTransferTable, isTimeInSegments, validateSourceDimensions } from '../lib/recipe';
 import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
 import type { VideoEditRecipe } from '../types';
 
@@ -36,21 +36,42 @@ type CropCorner = 'nw' | 'ne' | 'sw' | 'se';
 type CropRect = VideoEditRecipe['crop'];
 type VideoSegment = VideoEditRecipe['segments'][number];
 type RemoteSourceProgressState = RemoteSourceProgress & { fileName: string };
+type EditorSnapshot = {
+  segments: VideoSegment[];
+  selectedSegmentIndex: number;
+  rotation: VideoEditRecipe['rotation'];
+  crop: CropRect;
+  cropAspectRatio: number | null;
+  adjustments: Record<string, number>;
+};
+type SavedLook = {
+  id: string;
+  time: number;
+  thumbnail: string;
+  adjustments: Record<string, number>;
+};
 
 export function OnboardEditor() {
   const fileInput = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
+  const timelineTrackRef = useRef<HTMLDivElement>(null);
   const exportController = useRef<AbortController | null>(null);
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const remoteImportController = useRef<AbortController | null>(null);
   const dragRef = useRef<{ corner: CropCorner; crop: CropRect; rect: DOMRect } | null>(null);
   const frameDurationRef = useRef(DEFAULT_FRAME_DURATION);
   const globalKeyHandlerRef = useRef<(event: KeyboardEvent) => void>(() => {});
+  const arrowScrubRef = useRef<{ direction: -1 | 1; frameId: number } | null>(null);
   const initialFrameReadyRef = useRef(false);
+  const trimPreviewTimeoutRef = useRef<number | null>(null);
+  const undoHistoryRef = useRef<EditorSnapshot[]>([]);
+  const redoHistoryRef = useRef<EditorSnapshot[]>([]);
+  const editGestureRef = useRef(false);
+  const pendingEditSnapshotRef = useRef<EditorSnapshot | null>(null);
   const timelineDragRef = useRef<
     | { type: 'scrub' }
-    | { type: 'trim'; index: number; edge: 'startTime' | 'endTime'; segments: VideoSegment[]; rect: DOMRect; pointerX: number }
+    | { type: 'trim'; index: number; edge: 'startTime' | 'endTime'; segments: VideoSegment[]; rect: DOMRect; pointerX: number; restoreTime: number }
     | null
   >(null);
   const [file, setFile] = useState<File | null>(null);
@@ -66,6 +87,8 @@ export function OnboardEditor() {
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [duration, setDuration] = useState(0);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
+  const [timelineTrackSize, setTimelineTrackSize] = useState({ width: 0, height: 0 });
+  const [timelineFrames, setTimelineFrames] = useState<string[]>([]);
   const [sourceDimensionsValid, setSourceDimensionsValid] = useState(false);
   const [videoFrameStyle, setVideoFrameStyle] = useState<CSSProperties>({});
   const [currentTime, setCurrentTime] = useState(0);
@@ -82,6 +105,10 @@ export function OnboardEditor() {
   const [adjustments, setAdjustments] = useState<Record<string, number>>(
     Object.fromEntries(ADJUSTMENTS.map(([key]) => [key, 0])),
   );
+  const [savedLooks, setSavedLooks] = useState<SavedLook[]>([]);
+  const [savedLooksVisible, setSavedLooksVisible] = useState(false);
+  const [savingLook, setSavingLook] = useState(false);
+  const [activeSavedLookId, setActiveSavedLookId] = useState<string | null>(null);
   const [exportProgress, setExportProgress] = useState(0);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -126,6 +153,12 @@ export function OnboardEditor() {
 
   useEffect(() => () => remoteImportController.current?.abort(), []);
 
+  useEffect(() => () => {
+    if (trimPreviewTimeoutRef.current !== null) {
+      window.clearTimeout(trimPreviewTimeoutRef.current);
+    }
+  }, []);
+
   useEffect(() => {
     if (!exportMenuOpen) return;
     const closeOnOutsideClick = (event: Event) => {
@@ -167,6 +200,60 @@ export function OnboardEditor() {
     return () => observer.disconnect();
   }, [dimensions, rotation]);
 
+  useEffect(() => {
+    const track = timelineTrackRef.current;
+    if (!track) return;
+    const updateSize = () => {
+      const { width, height } = track.getBoundingClientRect();
+      setTimelineTrackSize((current) => (
+        current.width === width && current.height === height ? current : { width, height }
+      ));
+    };
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(track);
+    updateSize();
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    setTimelineFrames([]);
+    if (!previewUrl || !duration || !dimensions.width || !dimensions.height || !timelineTrackSize.width || !timelineTrackSize.height) return;
+    const controller = new AbortController();
+    const displayAspect = (rotation % 180 ? dimensions.height : dimensions.width)
+      * crop.width
+      / ((rotation % 180 ? dimensions.width : dimensions.height) * crop.height);
+    const frameCount = Math.max(1, Math.ceil(timelineTrackSize.width / (timelineTrackSize.height * displayAspect)));
+    const thumbnailVideo = document.createElement('video');
+    thumbnailVideo.muted = true;
+    thumbnailVideo.preload = 'auto';
+    thumbnailVideo.src = previewUrl;
+    thumbnailVideo.load();
+
+    void (async () => {
+      try {
+        await waitForMediaEvent(thumbnailVideo, 'loadedmetadata', controller.signal);
+        const frames: string[] = [];
+        for (let index = 0; index < frameCount; index += 1) {
+          if (controller.signal.aborted) return;
+          const time = duration * ((index + 0.5) / frameCount);
+          await seekForTimelineFrame(thumbnailVideo, time, controller.signal);
+          frames.push(createTimelineThumbnail(thumbnailVideo, crop, rotation));
+          setTimelineFrames([...frames]);
+        }
+      } catch {
+        if (!controller.signal.aborted) {
+          setError('Could not create timeline frame previews for this video.');
+        }
+      } finally {
+        thumbnailVideo.pause();
+        thumbnailVideo.removeAttribute('src');
+        thumbnailVideo.load();
+      }
+    })();
+
+    return () => controller.abort();
+  }, [crop, dimensions, duration, previewUrl, rotation, timelineTrackSize]);
+
   function chooseVideo(event: ChangeEvent<HTMLInputElement>) {
     const nextFile = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
@@ -176,7 +263,123 @@ export function OnboardEditor() {
     loadVideo(nextFile);
   }
 
+  function getEditSnapshot(): EditorSnapshot {
+    return {
+      segments: segments.map((segment) => ({ ...segment })),
+      selectedSegmentIndex,
+      rotation,
+      crop: { ...crop },
+      cropAspectRatio,
+      adjustments: { ...adjustments },
+    };
+  }
+
+  function pushUndoSnapshot(snapshot: EditorSnapshot) {
+    undoHistoryRef.current.push(snapshot);
+    if (undoHistoryRef.current.length > 100) undoHistoryRef.current.shift();
+  }
+
+  function invalidateExport() {
+    exportController.current?.abort();
+    setDownloadUrl('');
+    setDownloadFormat(null);
+  }
+
+  function beginEditGesture() {
+    if (editGestureRef.current) return;
+    editGestureRef.current = true;
+    pendingEditSnapshotRef.current = getEditSnapshot();
+  }
+
+  function finishEditGesture() {
+    editGestureRef.current = false;
+    pendingEditSnapshotRef.current = null;
+  }
+
+  function recordEdit() {
+    clearTrimPreview();
+    setActiveSavedLookId(null);
+    if (editGestureRef.current) {
+      if (pendingEditSnapshotRef.current) {
+        pushUndoSnapshot(pendingEditSnapshotRef.current);
+        pendingEditSnapshotRef.current = null;
+      }
+    } else {
+      pushUndoSnapshot(getEditSnapshot());
+    }
+    redoHistoryRef.current = [];
+    invalidateExport();
+  }
+
+  function applyEditSnapshot(snapshot: EditorSnapshot) {
+    const restoredSegments = snapshot.segments.map((segment) => ({ ...segment }));
+    const nextSelectedIndex = clamp(snapshot.selectedSegmentIndex, 0, Math.max(0, restoredSegments.length - 1));
+    const nextTime = isTimeInSegments(currentTime, restoredSegments)
+      ? currentTime
+      : restoredSegments[0]?.startTime ?? 0;
+    clearTrimPreview();
+    videoRef.current?.pause();
+    if (videoRef.current) {
+      videoRef.current.currentTime = nextTime;
+      videoRef.current.playbackRate = restoredSegments[nextSelectedIndex]?.playbackRate ?? 1;
+    }
+    setPlaying(false);
+    setSegments(restoredSegments);
+    setSelectedSegmentIndex(nextSelectedIndex);
+    setRotation(snapshot.rotation);
+    setCrop({ ...snapshot.crop });
+    setCropAspectRatio(snapshot.cropAspectRatio);
+    setAdjustments({ ...snapshot.adjustments });
+    setCurrentTime(nextTime);
+    playheadHiddenAfterTrimRef.current = false;
+    setPlayheadHiddenAfterTrim(false);
+    setShowCutTooltip(false);
+    setActiveSavedLookId(null);
+    invalidateExport();
+  }
+
+  function undoEdit() {
+    const previous = undoHistoryRef.current.pop();
+    if (!previous) return;
+    redoHistoryRef.current.push(getEditSnapshot());
+    applyEditSnapshot(previous);
+  }
+
+  function redoEdit() {
+    const next = redoHistoryRef.current.pop();
+    if (!next) return;
+    pushUndoSnapshot(getEditSnapshot());
+    applyEditSnapshot(next);
+  }
+
+  function clearTrimPreview() {
+    if (trimPreviewTimeoutRef.current !== null) {
+      window.clearTimeout(trimPreviewTimeoutRef.current);
+      trimPreviewTimeoutRef.current = null;
+    }
+  }
+
+  function showTrimPreviewFrame(previewTime: number, restoreTime: number) {
+    const video = videoRef.current;
+    if (!video) return;
+    clearTrimPreview();
+    video.pause();
+    video.currentTime = clamp(previewTime, 0, duration);
+    setCurrentTime(video.currentTime);
+    trimPreviewTimeoutRef.current = window.setTimeout(() => {
+      trimPreviewTimeoutRef.current = null;
+      const currentVideo = videoRef.current;
+      if (!currentVideo) return;
+      currentVideo.currentTime = restoreTime;
+      setCurrentTime(restoreTime);
+    }, 650);
+  }
+
   function loadVideo(nextFile?: File) {
+    clearTrimPreview();
+    undoHistoryRef.current = [];
+    redoHistoryRef.current = [];
+    finishEditGesture();
     setError('');
     setDownloadUrl('');
     setDownloadFormat(null);
@@ -188,6 +391,7 @@ export function OnboardEditor() {
     playheadHiddenAfterTrimRef.current = false;
     setDimensions({ width: 0, height: 0 });
     setSourceDimensionsValid(false);
+    setActiveSavedLookId(null);
     if (!nextFile) return;
     if (!nextFile.name.toLowerCase().endsWith('.mp4') && nextFile.type !== 'video/mp4') {
       setError('Choose an MP4 video.');
@@ -288,6 +492,7 @@ export function OnboardEditor() {
 
   function setCropAspect(aspectRatio: number) {
     if (!dimensions.width || !dimensions.height) return;
+    recordEdit();
     setCropAspectRatio(aspectRatio);
     setCrop(cropForAspectRatio(aspectRatio));
     setCropOverlayVisible(true);
@@ -295,6 +500,7 @@ export function OnboardEditor() {
 
   function rotateVideo() {
     const nextRotation = ROTATIONS[(ROTATIONS.indexOf(rotation) + 1) % ROTATIONS.length];
+    recordEdit();
     setRotation(nextRotation);
     if (cropAspectRatio !== null && dimensions.width && dimensions.height) {
       setCrop(cropForAspectRatio(cropAspectRatio, nextRotation));
@@ -348,35 +554,53 @@ export function OnboardEditor() {
         video.playbackRate = segments[segmentIndex].playbackRate;
       }
     }
-    if (!video.paused && segmentIndex >= 0 && time >= segments[segmentIndex].endTime - 0.025) {
-      const nextSegment = segments[segmentIndex + 1];
+    if (!video.paused && segmentIndex >= 0 && time >= segments[segmentIndex].endTime - frameDurationRef.current) {
+      const currentSegment = segments[segmentIndex];
+      const followingSegment = segments[segmentIndex + 1];
+      if (followingSegment && followingSegment.startTime <= currentSegment.endTime + 0.001) {
+        setCurrentTime(time);
+        return;
+      }
+      const nextSegment = followingSegment ?? segments[0];
       if (nextSegment) {
         video.currentTime = nextSegment.startTime;
+        video.playbackRate = nextSegment.playbackRate;
         setCurrentTime(nextSegment.startTime);
-      } else {
-        video.pause();
-        setCurrentTime(segments[segmentIndex].endTime);
       }
       return;
     }
-    if (segmentIndex === -1) {
-      const nextSegment = segments.find((segment) => segment.startTime > time);
+    if (!video.paused && segmentIndex === -1) {
+      const nextSegment = segments.find((segment) => segment.startTime > time) ?? segments[0];
       if (nextSegment) {
         video.currentTime = nextSegment.startTime;
+        video.playbackRate = nextSegment.playbackRate;
         setCurrentTime(nextSegment.startTime);
-      } else if (segments.length) {
-        video.pause();
-        video.currentTime = segments[segments.length - 1].endTime;
-        setCurrentTime(video.currentTime);
       }
       return;
     }
     setCurrentTime(time);
   }
 
+  function onVideoEnded() {
+    const video = videoRef.current;
+    const firstSegment = segments[0];
+    if (!video || !firstSegment) {
+      setPlaying(false);
+      return;
+    }
+    video.currentTime = firstSegment.startTime;
+    video.playbackRate = firstSegment.playbackRate;
+    setCurrentTime(firstSegment.startTime);
+    void video.play().catch(() => {
+      setPlaying(false);
+      setError('Could not continue playing this video in the browser.');
+    });
+  }
+
   async function togglePlayback() {
     const video = videoRef.current;
     if (!video) return;
+    clearTrimPreview();
     if (video.paused) {
       if (playheadHiddenAfterTrim) {
         const firstSegment = segments[0];
@@ -406,6 +630,7 @@ export function OnboardEditor() {
   function seekVideo(value: number) {
     const video = videoRef.current;
     if (!video) return;
+    clearTrimPreview();
     const containingSegment = segments.find((segment) => value >= segment.startTime && value < segment.endTime);
     const nextSegment = segments.find((segment) => segment.startTime > value);
     const resolvedTime = containingSegment
@@ -483,6 +708,7 @@ export function OnboardEditor() {
       event.preventDefault();
       event.stopPropagation();
       event.currentTarget.setPointerCapture(event.pointerId);
+      beginEditGesture();
       timelineDragRef.current = {
         type: 'trim',
         index: segmentIndex,
@@ -490,6 +716,7 @@ export function OnboardEditor() {
         segments: segments.map((segment) => ({ ...segment })),
         rect: event.currentTarget.getBoundingClientRect(),
         pointerX: event.clientX,
+        restoreTime: currentTime,
       };
       setSelectedSegmentIndex(segmentIndex);
       videoRef.current?.pause();
@@ -537,6 +764,10 @@ export function OnboardEditor() {
       updated[index].endTime = clamp(segment.endTime + delta, segment.startTime + 0.001, upperBound);
     }
     const playheadRemainsInKeptVideo = isTimeInSegments(currentTime, updated);
+    const changed = updated.some((item, itemIndex) => (
+      item.startTime !== segments[itemIndex].startTime || item.endTime !== segments[itemIndex].endTime
+    ));
+    if (changed) recordEdit();
     if (!playheadRemainsInKeptVideo && !playheadHiddenAfterTrim) {
       playheadHiddenAfterTrimRef.current = true;
       setPlayheadHiddenAfterTrim(true);
@@ -549,7 +780,22 @@ export function OnboardEditor() {
   }
 
   function onTimelinePointerUp() {
+    const drag = timelineDragRef.current;
+    if (drag?.type === 'trim') {
+      const originalSegment = drag.segments[drag.index];
+      const currentSegment = segments[drag.index];
+      if (
+        originalSegment && currentSegment
+        && (originalSegment.startTime !== currentSegment.startTime || originalSegment.endTime !== currentSegment.endTime)
+      ) {
+        const previewTime = drag.edge === 'startTime'
+          ? currentSegment.startTime
+          : Math.max(currentSegment.startTime, currentSegment.endTime - frameDurationRef.current);
+        showTrimPreviewFrame(previewTime, drag.restoreTime);
+      }
+    }
     timelineDragRef.current = null;
+    finishEditGesture();
   }
 
   function onTrimHandleKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
@@ -569,6 +815,8 @@ export function OnboardEditor() {
       const upperBound = index < segments.length - 1 ? segments[index + 1].startTime : duration;
       updated[index].endTime = clamp(segment.endTime + delta, segment.startTime + 0.001, upperBound);
     }
+    const changed = updated[index].startTime !== segment.startTime || updated[index].endTime !== segment.endTime;
+    if (changed) recordEdit();
     videoRef.current?.pause();
     setSegments(updated);
     setSelectedSegmentIndex(index);
@@ -580,11 +828,18 @@ export function OnboardEditor() {
       playheadHiddenAfterTrimRef.current = true;
       setPlayheadHiddenAfterTrim(true);
     }
+    if (changed) {
+      const previewTime = edge === 'startTime'
+        ? updated[index].startTime
+        : Math.max(updated[index].startTime, updated[index].endTime - frameDurationRef.current);
+      showTrimPreviewFrame(previewTime, currentTime);
+    }
   }
 
   function cutAtTime(time: number) {
     const index = getSegmentIndexAtCutTime(time);
     if (index < 0) return;
+    recordEdit();
     setShowCutTooltip(false);
     const selected = segments[index];
     const next = [
@@ -609,6 +864,7 @@ export function OnboardEditor() {
 
   function removeSelectedSegment() {
     if (segments.length <= 1 || !segments[selectedSegmentIndex]) return;
+    recordEdit();
     const removed = segments[selectedSegmentIndex];
     const next = segments.filter((_, index) => index !== selectedSegmentIndex);
     const nextIndex = Math.min(selectedSegmentIndex, next.length - 1);
@@ -632,6 +888,8 @@ export function OnboardEditor() {
   function setSelectedSegmentSpeed(playbackRate: number) {
     const segment = selectedSegment();
     if (!segment) return;
+    if (segment.playbackRate === playbackRate) return;
+    recordEdit();
     setSegments((current) => current.map((segment, index) => (
       index === selectedSegmentIndex ? { ...segment, playbackRate } : segment
     )));
@@ -645,8 +903,73 @@ export function OnboardEditor() {
     setSelectedSegmentIndex(index);
   }
 
+  function seekArrowScrub(value: number, direction: -1 | 1) {
+    const video = videoRef.current;
+    const firstSegment = segments[0];
+    const lastSegment = segments[segments.length - 1];
+    if (!video || !firstSegment || !lastSegment) return;
+
+    const minimum = firstSegment.startTime;
+    const maximum = Math.max(minimum, lastSegment.endTime - frameDurationRef.current);
+    const requestedTime = clamp(value, minimum, maximum);
+    const containingSegment = segments.find((segment) => (
+      requestedTime >= segment.startTime && requestedTime < segment.endTime
+    ));
+    const previousSegment = [...segments].reverse().find((segment) => segment.endTime <= requestedTime);
+    const nextSegment = segments.find((segment) => segment.startTime > requestedTime);
+    const resolvedTime = containingSegment
+      ? requestedTime
+      : direction > 0
+        ? nextSegment?.startTime ?? maximum
+        : previousSegment
+          ? Math.max(previousSegment.startTime, previousSegment.endTime - frameDurationRef.current)
+          : minimum;
+    video.currentTime = resolvedTime;
+    const activeIndex = segments.findIndex((segment) => (
+      resolvedTime >= segment.startTime && resolvedTime < segment.endTime
+    ));
+    if (activeIndex >= 0) video.playbackRate = segments[activeIndex].playbackRate;
+    setCurrentTime(resolvedTime);
+  }
+
+  function stopArrowScrub() {
+    if (!arrowScrubRef.current) return;
+    window.cancelAnimationFrame(arrowScrubRef.current.frameId);
+    arrowScrubRef.current = null;
+  }
+
+  function startArrowScrub(direction: -1 | 1) {
+    if (arrowScrubRef.current?.direction === direction) return;
+    stopArrowScrub();
+    const video = videoRef.current;
+    if (!video) return;
+    clearTrimPreview();
+    video.pause();
+    scrubByFrame(direction);
+
+    let previousTimestamp: number | null = null;
+    const advance = (timestamp: number) => {
+      const activeScrub = arrowScrubRef.current;
+      const currentVideo = videoRef.current;
+      if (!activeScrub || !currentVideo) return;
+      if (previousTimestamp !== null) {
+        const elapsed = Math.min((timestamp - previousTimestamp) / 1000, 0.1);
+        const movement = elapsed * currentVideo.playbackRate * 4 * direction;
+        const previousTime = currentVideo.currentTime;
+        seekArrowScrub(previousTime + movement, direction);
+        if (currentVideo.currentTime === previousTime) {
+          stopArrowScrub();
+          return;
+        }
+      }
+      previousTimestamp = timestamp;
+      activeScrub.frameId = window.requestAnimationFrame(advance);
+    };
+    arrowScrubRef.current = { direction, frameId: window.requestAnimationFrame(advance) };
+  }
+
   globalKeyHandlerRef.current = (event) => {
-    if (!file || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (!file || event.altKey) return;
     const activeElement = document.activeElement;
     const isTextEntry = activeElement instanceof HTMLElement && (
       activeElement.isContentEditable
@@ -656,12 +979,20 @@ export function OnboardEditor() {
     );
     if (isTextEntry) return;
 
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
+      event.preventDefault();
+      if (event.shiftKey) redoEdit();
+      else undoEdit();
+      return;
+    }
+    if (event.ctrlKey || event.metaKey) return;
+
     if (event.code === 'Space' || event.key === ' ') {
       event.preventDefault();
       void togglePlayback();
     } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       event.preventDefault();
-      scrubByFrame(event.key === 'ArrowLeft' ? -1 : 1);
+      startArrowScrub(event.key === 'ArrowLeft' ? -1 : 1);
     } else if (event.key === 'Home') {
       event.preventDefault();
       videoRef.current?.pause();
@@ -676,8 +1007,19 @@ export function OnboardEditor() {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => globalKeyHandlerRef.current(event);
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') stopArrowScrub();
+    };
+    const handleWindowBlur = () => stopArrowScrub();
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    window.addEventListener('blur', handleWindowBlur);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+      window.removeEventListener('blur', handleWindowBlur);
+      stopArrowScrub();
+    };
   }, []);
 
   function updateCrop(event: PointerEvent<HTMLDivElement>) {
@@ -697,12 +1039,15 @@ export function OnboardEditor() {
       next = { ...next, y: top, height: y + height - top };
     }
     if (drag.corner.includes('s')) next.height = clamp(height + dy, MIN_CROP_SIZE, 1 - y);
+    if (next.x === crop.x && next.y === crop.y && next.width === crop.width && next.height === crop.height) return;
+    recordEdit();
     setCropAspectRatio(null);
     setCrop(next);
   }
 
   function clearCropDrag() {
     dragRef.current = null;
+    finishEditGesture();
   }
 
   function recipe(): VideoEditRecipe {
@@ -740,11 +1085,43 @@ export function OnboardEditor() {
     exportController.current?.abort();
   }
 
-  const videoFilter = `brightness(${Math.max(0.1, 1 + (adjustments.brightness + adjustments.exposure * 0.35 + adjustments.brilliance * 0.15 + adjustments.highlights * 0.1 + adjustments.shadows * 0.2) / 100)}) contrast(${Math.max(0.1, 1 + (adjustments.contrast + adjustments.sharpness * 0.1 + adjustments.definition * 0.1 + adjustments.clarity * 0.2) / 100)}) saturate(${Math.max(0, 1 + (adjustments.saturation + adjustments.vibrance * 0.6) / 100)}) blur(${adjustments.denoise * 0.004}px)`;
+  function saveCurrentLook() {
+    const video = videoRef.current;
+    if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+      setError('Wait for a video frame to load before saving this look.');
+      return;
+    }
+
+    try {
+      const look: SavedLook = {
+        id: crypto.randomUUID(),
+        time: video.currentTime,
+        thumbnail: createSavedLookThumbnail(video, crop, rotation, adjustments),
+        adjustments: { ...adjustments },
+      };
+      setSavedLooks((current) => [...current, look]);
+      setError('');
+    } catch (snapshotError) {
+      setError(snapshotError instanceof Error
+        ? `Could not save this frame: ${snapshotError.message}`
+        : 'Could not save this frame.');
+    }
+  }
+
+  function applySavedLook(look: SavedLook) {
+    recordEdit();
+    setAdjustments({ ...look.adjustments });
+    setActiveSavedLookId(look.id);
+  }
+
   const rotated = rotation % 180 !== 0;
+  const previewTransferTable = buildPreviewTransferTable(adjustments)
+    .map((value) => (value / 255).toFixed(6))
+    .join(' ');
+  const previewSaturation = Math.max(0, 1 + (adjustments.saturation + adjustments.vibrance * 0.6) / 100);
   const canvasStyle: CSSProperties = {};
   const videoStyle: CSSProperties = {
-    filter: videoFilter,
+    filter: `url(#onboard-adjustments) saturate(${previewSaturation}) blur(${adjustments.denoise * 0.004}px)`,
     width: rotated ? `${(dimensions.width / dimensions.height) * 100}%` : '100%',
     height: rotated ? `${(dimensions.height / dimensions.width) * 100}%` : '100%',
     transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
@@ -759,6 +1136,7 @@ export function OnboardEditor() {
   const selectedTimelineSegment = segments[selectedSegmentIndex];
   const playheadInSelectedSegment = selectedTimelineSegment !== undefined
     && isTimeInSegments(currentTime, [selectedTimelineSegment]);
+  const playheadSegmentIndex = segments.findIndex((segment) => isTimeInSegments(currentTime, [segment]));
   if (duration > 0) {
     let keptThrough = 0;
     for (const segment of segments) {
@@ -792,8 +1170,12 @@ export function OnboardEditor() {
         disabled={!file}
         data-adjusted={value !== 0}
         style={{ background: `${defaultTick}, ${track} center / 100% 2px no-repeat` }}
+        onPointerDown={beginEditGesture}
+        onPointerUp={finishEditGesture}
+        onPointerCancel={finishEditGesture}
         onChange={(event) => {
           const value = Number(event.currentTarget.value);
+          if (value !== adjustments[key]) recordEdit();
           setAdjustments((current) => ({ ...current, [key]: value }));
         }}
       />
@@ -918,6 +1300,7 @@ export function OnboardEditor() {
               type="button"
               disabled={!file || (crop.x === 0 && crop.y === 0 && crop.width === 1 && crop.height === 1 && cropAspectRatio === null)}
               onClick={() => {
+                recordEdit();
                 setCrop({ x: 0, y: 0, width: 1, height: 1 });
                 setCropAspectRatio(null);
               }}
@@ -942,6 +1325,9 @@ export function OnboardEditor() {
                 step={PLAYBACK_RATE_STEP}
                 value={selectedSegment()?.playbackRate ?? 1}
                 disabled={!selectedSegment()}
+                onPointerDown={beginEditGesture}
+                onPointerUp={finishEditGesture}
+                onPointerCancel={finishEditGesture}
                 onChange={(event) => setSelectedSegmentSpeed(Number(Number(event.currentTarget.value).toFixed(1)))}
               />
               <div className="speed-slider-ticks" aria-hidden="true">
@@ -1021,6 +1407,15 @@ export function OnboardEditor() {
             }}
             onDrop={dropVideo}
           >
+            <svg className="preview-filter-defs" aria-hidden="true">
+              <filter id="onboard-adjustments" colorInterpolationFilters="sRGB">
+                <feComponentTransfer>
+                  <feFuncR type="table" tableValues={previewTransferTable} />
+                  <feFuncG type="table" tableValues={previewTransferTable} />
+                  <feFuncB type="table" tableValues={previewTransferTable} />
+                </feComponentTransfer>
+              </filter>
+            </svg>
             {!file ? (
               <div className="dropzone">
                 {remoteSourceProgress ? (
@@ -1071,7 +1466,7 @@ export function OnboardEditor() {
                   onTimeUpdate={onTimeUpdate}
                   onPlay={() => setPlaying(true)}
                   onPause={() => setPlaying(false)}
-                  onEnded={() => setPlaying(false)}
+                  onEnded={onVideoEnded}
                 />
                 {cropOverlayVisible && (
                   <div className="crop-selection" style={cropStyle} aria-label="Adjust crop by dragging a corner">
@@ -1086,6 +1481,7 @@ export function OnboardEditor() {
                           if (!frame) return;
                           event.preventDefault();
                           event.currentTarget.setPointerCapture(event.pointerId);
+                          beginEditGesture();
                           dragRef.current = { corner, crop: { ...crop }, rect: frame.getBoundingClientRect() };
                         }}
                       />
@@ -1102,24 +1498,69 @@ export function OnboardEditor() {
           <section className="tool-section adjustment-section">
             <div className="adjustment-heading">
               <h2>Adjustments</h2>
-              <button
-                className="reset-adjustments-button"
-                type="button"
-                aria-label="Reset adjustments"
-                disabled={Object.values(adjustments).every((value) => value === 0)}
-                onClick={() => setAdjustments(Object.fromEntries(ADJUSTMENTS.map(([key]) => [key, 0])))}
-              >
-                <RefreshCw size={14} />
-              </button>
+              <div className="adjustment-actions">
+                <button
+                  className="reset-adjustments-button"
+                  type="button"
+                  aria-label="Save frame and adjustments"
+                  title="Save frame and adjustments"
+                  disabled={!file}
+                  onClick={saveCurrentLook}
+                >
+                  <Copy size={14} />
+                </button>
+                <button
+                  className={`reset-adjustments-button saved-looks-toggle${savedLooksVisible ? ' active' : ''}`}
+                  type="button"
+                  aria-label="Toggle saved frames"
+                  title="Toggle saved frames"
+                  aria-pressed={savedLooksVisible}
+                  disabled={!savedLooks.length}
+                  onClick={() => setSavedLooksVisible((visible) => !visible)}
+                >
+                  <List size={15} />
+                </button>
+                <button
+                  className="reset-adjustments-button"
+                  type="button"
+                  aria-label="Reset adjustments"
+                  title="Reset adjustments"
+                  disabled={Object.values(adjustments).every((value) => value === 0)}
+                  onClick={() => {
+                    recordEdit();
+                    setAdjustments(Object.fromEntries(ADJUSTMENTS.map(([key]) => [key, 0])));
+                  }}
+                >
+                  <RefreshCw size={14} />
+                </button>
+              </div>
             </div>
-            <div className="adjustment-list">
-              {ADJUSTMENTS.map(([key, label]) => (
-                <label className={`adjustment-control${file ? '' : ' disabled'}`} key={key}>
-                  <span>{label}</span>
-                  {adjustmentSlider(key, label)}
-                </label>
-              ))}
-            </div>
+            {savedLooksVisible ? (
+              <div className="saved-look-gallery" aria-label="Saved frames">
+                {savedLooks.map((look, index) => (
+                  <button
+                    className={`saved-look${activeSavedLookId === look.id ? ' active' : ''}`}
+                    type="button"
+                    key={look.id}
+                    aria-label={`Apply saved adjustments ${index + 1} from ${formatTime(look.time)}`}
+                    aria-pressed={activeSavedLookId === look.id}
+                    onClick={() => applySavedLook(look)}
+                  >
+                    <img src={look.thumbnail} alt="" />
+                    <span>{formatTime(look.time)}</span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <div className="adjustment-list">
+                {ADJUSTMENTS.map(([key, label]) => (
+                  <label className={`adjustment-control${file ? '' : ' disabled'}`} key={key}>
+                    <span>{label}</span>
+                    {adjustmentSlider(key, label)}
+                  </label>
+                ))}
+              </div>
+            )}
           </section>
         </aside>
 
@@ -1141,6 +1582,7 @@ export function OnboardEditor() {
           })}
         </div>
         <div
+          ref={timelineTrackRef}
           className="timeline-track"
           role="group"
           aria-label="Video timeline"
@@ -1151,6 +1593,11 @@ export function OnboardEditor() {
           onPointerCancel={onTimelinePointerUp}
           onDoubleClick={onTimelineDoubleClick}
         >
+          <div className="timeline-thumbnails" aria-hidden="true">
+            {timelineFrames.map((frame, index) => (
+              <img src={frame} alt="" key={index} />
+            ))}
+          </div>
           {excludedRanges.map((range) => (
             <span
               key={`${range.startTime}-${range.endTime}`}
@@ -1167,10 +1614,10 @@ export function OnboardEditor() {
               key={`${segment.startTime}-${segment.endTime}`}
               className={
                 segments.length === 1
-                  ? `timeline-segment trim-active${index === selectedSegmentIndex ? ' selected' : ''}`
+                  ? `timeline-segment trim-active${index === selectedSegmentIndex ? ' selected' : ''}${index === playheadSegmentIndex ? ' active' : ''}`
                   : index === selectedSegmentIndex
-                    ? 'timeline-segment selected'
-                    : 'timeline-segment'
+                    ? `timeline-segment selected${index === playheadSegmentIndex ? ' active' : ''}`
+                    : `timeline-segment${index === playheadSegmentIndex ? ' active' : ''}`
               }
               style={{
                 left: `${(segment.startTime / duration) * 100}%`,
@@ -1231,6 +1678,167 @@ export function OnboardEditor() {
       </section>
     </main>
   );
+}
+
+function waitForMediaEvent(video: HTMLVideoElement, eventName: 'loadedmetadata', signal: AbortSignal) {
+  if (video.readyState >= HTMLMediaElement.HAVE_METADATA) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      video.removeEventListener(eventName, onReady);
+      video.removeEventListener('error', onError);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const onReady = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error('Video metadata could not be loaded.'));
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(new DOMException('Timeline preview cancelled.', 'AbortError'));
+    };
+    video.addEventListener(eventName, onReady, { once: true });
+    video.addEventListener('error', onError, { once: true });
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function seekForTimelineFrame(video: HTMLVideoElement, time: number, signal: AbortSignal) {
+  if (Math.abs(video.currentTime - time) < 0.001) return Promise.resolve();
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = () => {
+      video.removeEventListener('seeked', onSeeked);
+      video.removeEventListener('error', onError);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const onSeeked = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error('A timeline frame could not be decoded.'));
+    };
+    const onAbort = () => {
+      cleanup();
+      reject(new DOMException('Timeline preview cancelled.', 'AbortError'));
+    };
+    video.addEventListener('seeked', onSeeked, { once: true });
+    video.addEventListener('error', onError, { once: true });
+    signal.addEventListener('abort', onAbort, { once: true });
+    video.currentTime = time;
+  });
+}
+
+function createTimelineThumbnail(
+  video: HTMLVideoElement,
+  crop: CropRect,
+  rotation: VideoEditRecipe['rotation'],
+) {
+  const scale = Math.min(1, 320 / video.videoWidth, 180 / video.videoHeight);
+  const source = document.createElement('canvas');
+  source.width = Math.max(1, Math.round(video.videoWidth * scale));
+  source.height = Math.max(1, Math.round(video.videoHeight * scale));
+  const sourceContext = source.getContext('2d');
+  if (!sourceContext) throw new Error('The browser could not create a timeline preview.');
+  sourceContext.drawImage(video, 0, 0, source.width, source.height);
+
+  const oriented = document.createElement('canvas');
+  oriented.width = rotation % 180 ? source.height : source.width;
+  oriented.height = rotation % 180 ? source.width : source.height;
+  const orientedContext = oriented.getContext('2d');
+  if (!orientedContext) throw new Error('The browser could not create a timeline preview.');
+  orientedContext.translate(oriented.width / 2, oriented.height / 2);
+  orientedContext.rotate((rotation * Math.PI) / 180);
+  orientedContext.drawImage(source, -source.width / 2, -source.height / 2);
+
+  const cropX = Math.round(crop.x * oriented.width);
+  const cropY = Math.round(crop.y * oriented.height);
+  const cropWidth = Math.max(1, Math.round(crop.width * oriented.width));
+  const cropHeight = Math.max(1, Math.round(crop.height * oriented.height));
+  const thumbnail = document.createElement('canvas');
+  thumbnail.width = cropWidth;
+  thumbnail.height = cropHeight;
+  const thumbnailContext = thumbnail.getContext('2d');
+  if (!thumbnailContext) throw new Error('The browser could not create a timeline preview.');
+  thumbnailContext.drawImage(
+    oriented,
+    cropX,
+    cropY,
+    cropWidth,
+    cropHeight,
+    0,
+    0,
+    thumbnail.width,
+    thumbnail.height,
+  );
+  return thumbnail.toDataURL('image/jpeg', 0.78);
+}
+
+function createSavedLookThumbnail(
+  video: HTMLVideoElement,
+  crop: CropRect,
+  rotation: VideoEditRecipe['rotation'],
+  adjustments: Record<string, number>,
+) {
+  const scale = Math.min(1, 640 / video.videoWidth, 640 / video.videoHeight);
+  const source = document.createElement('canvas');
+  source.width = Math.max(1, Math.round(video.videoWidth * scale));
+  source.height = Math.max(1, Math.round(video.videoHeight * scale));
+  const sourceContext = source.getContext('2d', { willReadFrequently: true });
+  if (!sourceContext) throw new Error('The browser could not create an image preview.');
+  sourceContext.drawImage(video, 0, 0, source.width, source.height);
+
+  const image = sourceContext.getImageData(0, 0, source.width, source.height);
+  const transferTable = buildPreviewTransferTable(adjustments);
+  const saturation = Math.max(0, 1 + (adjustments.saturation + adjustments.vibrance * 0.6) / 100);
+  for (let index = 0; index < image.data.length; index += 4) {
+    const red = transferTable[image.data[index]] / 255;
+    const green = transferTable[image.data[index + 1]] / 255;
+    const blue = transferTable[image.data[index + 2]] / 255;
+    const luminance = red * 0.213 + green * 0.715 + blue * 0.072;
+    image.data[index] = (luminance + (red - luminance) * saturation) * 255;
+    image.data[index + 1] = (luminance + (green - luminance) * saturation) * 255;
+    image.data[index + 2] = (luminance + (blue - luminance) * saturation) * 255;
+  }
+  sourceContext.putImageData(image, 0, 0);
+
+  const oriented = document.createElement('canvas');
+  oriented.width = rotation % 180 ? source.height : source.width;
+  oriented.height = rotation % 180 ? source.width : source.height;
+  const orientedContext = oriented.getContext('2d');
+  if (!orientedContext) throw new Error('The browser could not create an image preview.');
+  orientedContext.translate(oriented.width / 2, oriented.height / 2);
+  orientedContext.rotate((rotation * Math.PI) / 180);
+  orientedContext.drawImage(source, -source.width / 2, -source.height / 2);
+
+  const cropX = Math.round(crop.x * oriented.width);
+  const cropY = Math.round(crop.y * oriented.height);
+  const cropWidth = Math.max(1, Math.round(crop.width * oriented.width));
+  const cropHeight = Math.max(1, Math.round(crop.height * oriented.height));
+  const thumbnailScale = Math.min(1, 320 / cropWidth, 180 / cropHeight);
+  const thumbnail = document.createElement('canvas');
+  thumbnail.width = Math.max(1, Math.round(cropWidth * thumbnailScale));
+  thumbnail.height = Math.max(1, Math.round(cropHeight * thumbnailScale));
+  const thumbnailContext = thumbnail.getContext('2d');
+  if (!thumbnailContext) throw new Error('The browser could not create an image preview.');
+  thumbnailContext.imageSmoothingQuality = 'high';
+  thumbnailContext.filter = `blur(${adjustments.denoise * 0.004 * thumbnailScale}px)`;
+  thumbnailContext.drawImage(
+    oriented,
+    cropX,
+    cropY,
+    cropWidth,
+    cropHeight,
+    0,
+    0,
+    thumbnail.width,
+    thumbnail.height,
+  );
+  return thumbnail.toDataURL('image/jpeg', 0.82);
 }
 
 function clamp(value: number, min: number, max: number) {

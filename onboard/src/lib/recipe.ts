@@ -112,18 +112,14 @@ export function buildMp4Filter(recipe: VideoEditRecipe) {
   return `${buildVideoSegmentFilters(recipe, 30).join(';')};[joined]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[out]`;
 }
 
+export function buildPreviewTransferTable(adjustments: Record<string, number>) {
+  const transform = getColorTransform(adjustments);
+  return Array.from({ length: 256 }, (_, value) => applyColorTransform(value / 255, transform) * 255);
+}
+
 function buildVideoSegmentFilters(recipe: VideoEditRecipe, frameRate: number) {
   const { crop, adjustments, rotation } = recipe;
-  const exposureGamma = 2 ** (adjustments.exposure / 100);
-  const contrast = Math.max(0.1, 1 + adjustments.contrast / 100);
-  const brightness = Math.max(-1, Math.min(1, (adjustments.brightness + adjustments.exposure * 0.35) / 100));
-  const saturation = Math.max(0, 1 + (adjustments.saturation + adjustments.vibrance * 0.6) / 100);
-  const shadowOutput = clamp(0.25 + adjustments.shadows * 0.0015, 0.05, 0.45);
-  const midOutput = clamp(0.5 + adjustments.brilliance * 0.0015, shadowOutput + 0.05, 0.75);
-  const highlightOutput = clamp(0.75 + adjustments.highlights * 0.0015, midOutput + 0.05, 0.95);
-  const shadowPoint = curvePoint(0.25, shadowOutput);
-  const highlightPoint = curvePoint(0.75, highlightOutput);
-  const midPoint = curvePoint(0.5, midOutput);
+  const transform = getColorTransform(adjustments);
   const unsharpAmount = Math.max(0, (adjustments.sharpness + adjustments.definition * 0.7) / 100);
   const clarityAmount = adjustments.clarity / 100;
   const denoiseAmount = adjustments.denoise;
@@ -137,8 +133,8 @@ function buildVideoSegmentFilters(recipe: VideoEditRecipe, frameRate: number) {
   const filters = [
     ...rotationFilters,
     `crop=iw*${crop.width}:ih*${crop.height}:iw*${crop.x}:ih*${crop.y}`,
-    `eq=brightness=${brightness}:contrast=${contrast}:gamma=${exposureGamma}:saturation=${saturation}`,
-    `curves=all='0/0 ${shadowPoint} ${midPoint} ${highlightPoint} 1/1'`,
+    `lutrgb=r='${buildColorTransformExpression(transform)}':g='${buildColorTransformExpression(transform)}':b='${buildColorTransformExpression(transform)}'`,
+    `eq=saturation=${transform.saturation}`,
   ];
   if (unsharpAmount > 0) {
     filters.push(`unsharp=5:5:${Math.min(2, unsharpAmount).toFixed(3)}:5:5:0`);
@@ -161,6 +157,67 @@ function buildVideoSegmentFilters(recipe: VideoEditRecipe, frameRate: number) {
   return segmentFilters;
 }
 
+type ColorTransform = ReturnType<typeof getColorTransform>;
+
+function getColorTransform(adjustments: Record<string, number>) {
+  const brightness = clamp((adjustments.brightness + adjustments.exposure * 0.35) / 100, -1, 1);
+  const contrast = Math.max(0.1, 1 + adjustments.contrast / 100);
+  const gamma = 2 ** (adjustments.exposure / 100);
+  const shadowOutput = clamp(0.25 + adjustments.shadows * 0.0015, 0.05, 0.45);
+  const midOutput = clamp(0.5 + adjustments.brilliance * 0.0015, shadowOutput + 0.05, 0.75);
+  const highlightOutput = clamp(0.75 + adjustments.highlights * 0.0015, midOutput + 0.05, 0.95);
+
+  return {
+    brightness,
+    contrast,
+    gamma,
+    saturation: Math.max(0, 1 + (adjustments.saturation + adjustments.vibrance * 0.6) / 100),
+    curvePoints: [
+      [0, 0],
+      [0.25, shadowOutput],
+      [0.5, midOutput],
+      [0.75, highlightOutput],
+      [1, 1],
+    ] as const,
+  };
+}
+
+function applyColorTransform(value: number, transform: ColorTransform) {
+  const adjusted = clamp((value - 0.5) * transform.contrast + 0.5 + transform.brightness, 0, 1);
+  const gammaAdjusted = Math.pow(adjusted, 1 / transform.gamma);
+  const points = transform.curvePoints;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const [startX, startY] = points[index];
+    const [endX, endY] = points[index + 1];
+    if (gammaAdjusted <= endX) {
+      return startY + ((gammaAdjusted - startX) / (endX - startX)) * (endY - startY);
+    }
+  }
+  return 1;
+}
+
+function buildColorTransformExpression(transform: ColorTransform) {
+  const input = `clip((val/255-0.5)*${formatFilterNumber(transform.contrast)}+0.5+${formatFilterNumber(transform.brightness)},0,1)`;
+  const gammaAdjusted = `pow(${input},${formatFilterNumber(1 / transform.gamma)})`;
+  let curveExpression = '1';
+
+  for (let index = transform.curvePoints.length - 2; index >= 0; index -= 1) {
+    const [startX, startY] = transform.curvePoints[index];
+    const [endX] = transform.curvePoints[index + 1];
+    const slope = (transform.curvePoints[index + 1][1] - startY) / (endX - startX);
+    const segmentExpression = `${formatFilterNumber(startY)}+(${gammaAdjusted}-${formatFilterNumber(startX)})*${formatFilterNumber(slope)}`;
+    curveExpression = index === 0
+      ? segmentExpression
+      : `if(lt(${gammaAdjusted},${formatFilterNumber(endX)}),${segmentExpression},${curveExpression})`;
+  }
+
+  return `clip(${curveExpression},0,1)*255`;
+}
+
+function formatFilterNumber(value: number) {
+  return value.toFixed(6);
+}
+
 function asRecord(value: unknown, error: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(error);
@@ -178,10 +235,6 @@ function finiteNumber(value: unknown, label: string) {
 
 function isRotation(value: number): value is VideoEditRecipe['rotation'] {
   return ROTATIONS.some((rotation) => rotation === value);
-}
-
-function curvePoint(input: number, output: number) {
-  return `${input}/${output.toFixed(3)}`;
 }
 
 function clamp(value: number, min: number, max: number) {
