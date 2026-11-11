@@ -272,6 +272,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .timeline-thumbnails { position: absolute; z-index: 0; inset: 0; display: flex; overflow: hidden; pointer-events: none; }
 .timeline-thumbnails::after { position: absolute; inset: 0; background: rgba(0,0,0,.5); content: ""; }
 .timeline-thumbnails img { display: block; width: auto; height: 100%; flex: 0 0 auto; object-fit: contain; }
+.timeline-empty-tick { position: absolute; z-index: 1; top: 0; bottom: 0; width: 1px; background: rgba(164,168,172,.55); pointer-events: none; }
 .timeline-excluded { position: absolute; z-index: 1; top: 0; bottom: 0; background: rgba(15,16,17,.64); pointer-events: none; }
 .timeline-cut-mark { position: absolute; z-index: 3; top: -1px; bottom: -1px; width: 1px; transform: translateX(-50%); background: rgba(193,198,200,.78); pointer-events: none; }
 .timeline-cut-mark::before, .timeline-cut-mark::after { position: absolute; left: -3px; width: 7px; height: 2px; background: #c2c6c8; content: ""; }

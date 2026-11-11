@@ -7,6 +7,7 @@ import type { VideoEditRecipe } from '../types';
 
 const MIN_CROP_SIZE = 0.05;
 const DEFAULT_FRAME_DURATION = 1 / 30;
+const ARROW_SCRUB_HOLD_DELAY_MS = 1000;
 const PLAYBACK_RATE_MIN = 0.5;
 const PLAYBACK_RATE_MAX = 2;
 const PLAYBACK_RATE_STEP = 0.1;
@@ -68,7 +69,11 @@ export function OnboardEditor() {
   } | null>(null);
   const frameDurationRef = useRef(DEFAULT_FRAME_DURATION);
   const globalKeyHandlerRef = useRef<(event: KeyboardEvent) => void>(() => {});
-  const arrowScrubRef = useRef<{ direction: -1 | 1; frameId: number } | null>(null);
+  const arrowScrubRef = useRef<{
+    direction: -1 | 1;
+    frameId: number | null;
+    holdTimeoutId: number | null;
+  } | null>(null);
   const timelineSeekFrameRef = useRef<number | null>(null);
   const pendingTimelineSeekRef = useRef<{ time: number; isBoundaryPreview: boolean } | null>(null);
   const initialFrameReadyRef = useRef(false);
@@ -1025,8 +1030,10 @@ export function OnboardEditor() {
   }
 
   function stopArrowScrub() {
-    if (!arrowScrubRef.current) return;
-    window.cancelAnimationFrame(arrowScrubRef.current.frameId);
+    const activeScrub = arrowScrubRef.current;
+    if (!activeScrub) return;
+    if (activeScrub.holdTimeoutId !== null) window.clearTimeout(activeScrub.holdTimeoutId);
+    if (activeScrub.frameId !== null) window.cancelAnimationFrame(activeScrub.frameId);
     arrowScrubRef.current = null;
   }
 
@@ -1039,25 +1046,34 @@ export function OnboardEditor() {
     video.pause();
     scrubByFrame(direction);
 
-    let previousTimestamp: number | null = null;
-    const advance = (timestamp: number) => {
-      const activeScrub = arrowScrubRef.current;
-      const currentVideo = videoRef.current;
-      if (!activeScrub || !currentVideo) return;
-      if (previousTimestamp !== null) {
-        const elapsed = Math.min((timestamp - previousTimestamp) / 1000, 0.1);
-        const movement = elapsed * currentVideo.playbackRate * 4 * direction;
-        const previousTime = currentVideo.currentTime;
-        seekArrowScrub(previousTime + movement, direction);
-        if (currentVideo.currentTime === previousTime) {
-          stopArrowScrub();
-          return;
-        }
-      }
-      previousTimestamp = timestamp;
-      activeScrub.frameId = window.requestAnimationFrame(advance);
+    const activeScrub = {
+      direction,
+      frameId: null as number | null,
+      holdTimeoutId: null as number | null,
     };
-    arrowScrubRef.current = { direction, frameId: window.requestAnimationFrame(advance) };
+    arrowScrubRef.current = activeScrub;
+    activeScrub.holdTimeoutId = window.setTimeout(() => {
+      if (arrowScrubRef.current !== activeScrub) return;
+      activeScrub.holdTimeoutId = null;
+      let previousTimestamp: number | null = null;
+      const advance = (timestamp: number) => {
+        const currentVideo = videoRef.current;
+        if (arrowScrubRef.current !== activeScrub || !currentVideo) return;
+        if (previousTimestamp !== null) {
+          const elapsed = Math.min((timestamp - previousTimestamp) / 1000, 0.1);
+          const movement = elapsed * currentVideo.playbackRate * 4 * direction;
+          const previousTime = currentVideo.currentTime;
+          seekArrowScrub(previousTime + movement, direction);
+          if (currentVideo.currentTime === previousTime) {
+            stopArrowScrub();
+            return;
+          }
+        }
+        previousTimestamp = timestamp;
+        activeScrub.frameId = window.requestAnimationFrame(advance);
+      };
+      activeScrub.frameId = window.requestAnimationFrame(advance);
+    }, ARROW_SCRUB_HOLD_DELAY_MS);
   }
 
   globalKeyHandlerRef.current = (event) => {
@@ -1823,6 +1839,14 @@ export function OnboardEditor() {
               <img src={frame} alt="" key={index} />
             ))}
           </div>
+          {!duration && [25, 50, 75].map((position) => (
+            <span
+              key={`empty-tick-${position}`}
+              className="timeline-empty-tick"
+              aria-hidden="true"
+              style={{ left: `${position}%` }}
+            />
+          ))}
           {excludedRanges.map((range) => (
             <span
               key={`${range.startTime}-${range.endTime}`}
@@ -2097,9 +2121,9 @@ function formatTime(seconds: number) {
 }
 
 function formatTimecode(seconds: number) {
-  const totalSeconds = Math.floor(Math.max(0, seconds));
-  const hours = Math.floor(totalSeconds / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const remainingSeconds = totalSeconds % 60;
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
+  const safeSeconds = Math.max(0, seconds);
+  const minutes = Math.floor(safeSeconds / 60);
+  const wholeSeconds = Math.floor(safeSeconds % 60);
+  const milliseconds = Math.floor((safeSeconds % 1) * 1000);
+  return `${String(minutes).padStart(2, '0')}:${String(wholeSeconds).padStart(2, '0')}:${String(milliseconds).padStart(3, '0')}`;
 }

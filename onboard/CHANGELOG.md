@@ -4,6 +4,18 @@ This log records product and interface iterations so prior decisions can be unde
 
 ## 2026-11-11
 
+### Corrected timeline timecode and empty-state ticks
+
+- Changed the timeline position/duration readout to minutes, seconds, and milliseconds (`MM:SS:MMM`).
+- Restored tick marks at 25%, 50%, and 75% across the blank timeline track.
+- Rationale: show precise elapsed time in the intended format and restore the empty timeline's visual scale.
+
+### Delayed high-speed arrow scrubbing
+
+- Arrow presses still move the playhead by one frame immediately, while continuous 4× scrubbing now starts only after holding the key for one second.
+- Releasing the key before the delay cancels high-speed scrubbing.
+- Rationale: prevent ordinary frame-by-frame keyboard use from accelerating unexpectedly.
+
 ### Stabilized crop dragging and added inverse aspect presets
 
 - Fixed freeform crop deltas to use pointer movement from drag start and captured pointer input on the stable video frame rather than the moving handle.

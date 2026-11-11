@@ -82,10 +82,11 @@ Onboard is not a drive, media library, or place to upload and save source files 
 ### Timeline editing
 
 - Scrub through the footage in the timeline.
-- Show the current playhead time and total source duration beside the Timeline heading as `HH:MM:SS / HH:MM:SS`.
+- Show the current playhead time and total source duration beside the Timeline heading as `MM:SS:MMM / MM:SS:MMM` (minutes, seconds, milliseconds).
+- Show subtle tick marks at 25%, 50%, and 75% of the blank timeline track before a video is loaded.
 - Drag the playhead to scrub; clicking elsewhere on the timeline must not seek.
 - Update the video preview continuously while the playhead is dragged, not only after the drag ends.
-- With the timeline focused, Left and Right Arrow move the playhead by one source video frame; holding either key scrubs at four times the active section's playback rate.
+- With the timeline focused, Left and Right Arrow move the playhead by one source video frame per press; holding either key for one second starts scrubbing at four times the active section's playback rate.
 - Clicking the video toggles the crop-mark overlay without changing playback. Pressing Space while the video is focused plays or pauses it.
 - Crop presets always show the crop-mark overlay.
 - After timeline trimming, hide the playhead, pause playback, and ignore video time updates until playback resumes. Park at the first kept section; the playhead returns only when playback resumes from there.
