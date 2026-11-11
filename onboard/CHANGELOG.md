@@ -4,6 +4,20 @@ This log records product and interface iterations so prior decisions can be unde
 
 ## 2026-11-11
 
+### Improved clip-boundary playback and export diagnostics
+
+- Check clip transitions on presented video frames, switching speed at adjacent cuts and seeking to the next retained section before playback runs through removed footage.
+- Capture bounded FFmpeg logs and report whether failures point to source decoding, crop/adjustment filters, GIF palette encoding, memory pressure, or an undiagnosed encoder exit.
+- Added the retained, speed-adjusted output duration next to the timeline clock; all displayed timeline times now use centiseconds.
+- Rationale: reduce visible cut stutter and make export failures diagnosable without assuming an unsupported duration limit or blaming the source without evidence.
+
+### Added automatic downloads and an export queue
+
+- Captured each export's source file, edits, format, duration, and output name when queued, then processed queued jobs sequentially so the active editor remains available.
+- Automatically downloaded each finished GIF or MP4 and removed its notification after completion.
+- Added dismissible per-export notifications under the Export control with progress and cancellation; dismissing a notification does not cancel its export.
+- Rationale: let users move directly to another video while preserving each export's exact edit state and avoiding multiple FFmpeg jobs competing for browser resources.
+
 ### Corrected timeline timecode and empty-state ticks
 
 - Changed the timeline position/duration readout to minutes, seconds, and milliseconds (`MM:SS:MMM`).

@@ -1,7 +1,7 @@
 import { type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
-import { ArrowDownUp, Check, ChevronDown, Copy, Crop, Download, Link2, List, Pause, Play, RefreshCw, RotateCw, Scissors, Trash2, Upload } from 'lucide-react';
+import { ArrowDownUp, Check, ChevronDown, Copy, Crop, Download, Link2, List, Pause, Play, RefreshCw, RotateCw, Scissors, Trash2, Upload, X } from 'lucide-react';
 import { exportGif as exportGifLocally, exportMp4 as exportMp4Locally } from '../lib/editor';
-import { buildPreviewTransferTable, isIncreaseOnlyAdjustment, isTimeInSegments, validateSourceDimensions } from '../lib/recipe';
+import { buildPreviewTransferTable, getEditedDuration, isIncreaseOnlyAdjustment, isTimeInSegments, validateSourceDimensions } from '../lib/recipe';
 import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
 import type { VideoEditRecipe } from '../types';
 
@@ -51,13 +51,27 @@ type SavedLook = {
   thumbnail: string;
   adjustments: Record<string, number>;
 };
+type ExportJob = {
+  id: string;
+  file: File;
+  recipe: VideoEditRecipe;
+  duration: number;
+  format: 'gif' | 'mp4';
+  fileName: string;
+  status: 'queued' | 'exporting' | 'error';
+  progress: number;
+  error?: string;
+  dismissed?: boolean;
+};
 
 export function OnboardEditor() {
   const fileInput = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const timelineTrackRef = useRef<HTMLDivElement>(null);
-  const exportController = useRef<AbortController | null>(null);
+  const exportControllers = useRef(new Map<string, AbortController>());
+  const exportQueueRunning = useRef(false);
+  const exportJobsRef = useRef<ExportJob[]>([]);
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const remoteImportController = useRef<AbortController | null>(null);
   const dragRef = useRef<{
@@ -94,9 +108,8 @@ export function OnboardEditor() {
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState('');
   const [previewUrl, setPreviewUrl] = useState('');
-  const [downloadUrl, setDownloadUrl] = useState('');
   const [exportFormat, setExportFormat] = useState<'gif' | 'mp4'>('gif');
-  const [downloadFormat, setDownloadFormat] = useState<'gif' | 'mp4' | null>(null);
+  const [exportJobs, setExportJobs] = useState<ExportJob[]>([]);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [duration, setDuration] = useState(0);
@@ -112,6 +125,8 @@ export function OnboardEditor() {
   const [playheadHiddenAfterTrim, setPlayheadHiddenAfterTrim] = useState(false);
   const playheadHiddenAfterTrimRef = useRef(false);
   const [segments, setSegments] = useState<VideoSegment[]>([]);
+  const segmentsRef = useRef(segments);
+  segmentsRef.current = segments;
   const [selectedSegmentIndex, setSelectedSegmentIndex] = useState(0);
   const [rotation, setRotation] = useState<0 | 90 | 180 | 270>(0);
   const [crop, setCrop] = useState<CropRect>({ x: 0, y: 0, width: 1, height: 1 });
@@ -124,13 +139,12 @@ export function OnboardEditor() {
   const [savingLook, setSavingLook] = useState(false);
   const [activeSavedLookId, setActiveSavedLookId] = useState<string | null>(null);
   const [deletingSavedLookId, setDeletingSavedLookId] = useState<string | null>(null);
-  const [exportProgress, setExportProgress] = useState(0);
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
   const [remoteSourceProgress, setRemoteSourceProgress] = useState<RemoteSourceProgressState | null>(null);
   const [remoteSourceHandoff] = useState(() => new URLSearchParams(window.location.hash.slice(1)).get('source'));
   const [remoteSourceUrl, setRemoteSourceUrl] = useState('');
   const [showRemoteSourceInput, setShowRemoteSourceInput] = useState(false);
+  const editedDuration = getEditedDuration(segments);
 
   useEffect(() => {
     if (!file) return;
@@ -153,18 +167,49 @@ export function OnboardEditor() {
         }
       }
       previousFrame = { mediaTime: metadata.mediaTime, presentedFrames: metadata.presentedFrames };
+      if (!video.paused && !playheadHiddenAfterTrimRef.current) {
+        const currentSegments = segmentsRef.current;
+        const segmentIndex = currentSegments.findIndex((segment) => (
+          metadata.mediaTime >= segment.startTime && metadata.mediaTime < segment.endTime
+        ));
+        if (segmentIndex >= 0) {
+          const currentSegment = currentSegments[segmentIndex];
+          const followingSegment = currentSegments[segmentIndex + 1];
+          setSelectedSegmentIndex(segmentIndex);
+          if (video.playbackRate !== currentSegment.playbackRate) {
+            video.playbackRate = currentSegment.playbackRate;
+          }
+          const frameAdvance = frameDurationRef.current * video.playbackRate;
+          if (metadata.mediaTime + frameAdvance >= currentSegment.endTime) {
+            if (followingSegment && followingSegment.startTime <= currentSegment.endTime + frameDurationRef.current / 4) {
+              video.playbackRate = followingSegment.playbackRate;
+            } else {
+              const nextSegment = followingSegment ?? currentSegments[0];
+              if (nextSegment) {
+                video.currentTime = nextSegment.startTime;
+                video.playbackRate = nextSegment.playbackRate;
+                setCurrentTime(nextSegment.startTime);
+              }
+            }
+          }
+        } else {
+          const nextSegment = currentSegments.find((segment) => segment.startTime > metadata.mediaTime) ?? currentSegments[0];
+          if (nextSegment) {
+            video.currentTime = nextSegment.startTime;
+            video.playbackRate = nextSegment.playbackRate;
+            setCurrentTime(nextSegment.startTime);
+          }
+        }
+      }
       callbackId = video.requestVideoFrameCallback(observeFrame);
     };
     callbackId = video.requestVideoFrameCallback(observeFrame);
     return () => video.cancelVideoFrameCallback(callbackId);
   }, [previewUrl]);
 
-  useEffect(() => {
-    if (!downloadUrl) return;
-    return () => URL.revokeObjectURL(downloadUrl);
-  }, [downloadUrl]);
-
-  useEffect(() => () => exportController.current?.abort(), []);
+  useEffect(() => () => {
+    exportControllers.current.forEach((controller) => controller.abort());
+  }, []);
 
   useEffect(() => () => remoteImportController.current?.abort(), []);
 
@@ -299,10 +344,10 @@ export function OnboardEditor() {
     if (undoHistoryRef.current.length > 100) undoHistoryRef.current.shift();
   }
 
-  function invalidateExport() {
-    exportController.current?.abort();
-    setDownloadUrl('');
-    setDownloadFormat(null);
+  function updateExportJobs(update: (current: ExportJob[]) => ExportJob[]) {
+    const next = update(exportJobsRef.current);
+    exportJobsRef.current = next;
+    setExportJobs(next);
   }
 
   function beginEditGesture() {
@@ -328,7 +373,6 @@ export function OnboardEditor() {
       pushUndoSnapshot(getEditSnapshot());
     }
     redoHistoryRef.current = [];
-    invalidateExport();
   }
 
   function applyEditSnapshot(snapshot: EditorSnapshot) {
@@ -355,7 +399,6 @@ export function OnboardEditor() {
     setPlayheadHiddenAfterTrim(false);
     setShowCutTooltip(false);
     setActiveSavedLookId(null);
-    invalidateExport();
   }
 
   function undoEdit() {
@@ -410,8 +453,6 @@ export function OnboardEditor() {
     redoHistoryRef.current = [];
     finishEditGesture();
     setError('');
-    setDownloadUrl('');
-    setDownloadFormat(null);
     setDuration(0);
     setSegments([]);
     setCurrentTime(0);
@@ -1159,39 +1200,102 @@ export function OnboardEditor() {
     finishEditGesture();
   }
 
-  function recipe(): VideoEditRecipe {
-    return { segments, rotation, crop, adjustments };
+  function dismissExportJob(jobId: string) {
+    updateExportJobs((current) => current.flatMap((job) => {
+      if (job.id !== jobId) return [job];
+      return job.status === 'error' ? [] : [{ ...job, dismissed: true }];
+    }));
   }
 
-  async function startExport() {
-    if (!file || !segments.length || !sourceDimensionsValid) return;
-    const controller = new AbortController();
-    exportController.current = controller;
-    setBusy(true);
-    setError('');
-    setDownloadUrl('');
-    setDownloadFormat(null);
-    setExportProgress(0);
+  function removeExportJob(jobId: string) {
+    updateExportJobs((current) => current.filter((job) => job.id !== jobId));
+  }
+
+  function cancelExport(jobId: string) {
+    exportControllers.current.get(jobId)?.abort();
+  }
+
+  async function processExportQueue() {
+    if (exportQueueRunning.current) return;
+    exportQueueRunning.current = true;
     try {
-      const output = exportFormat === 'gif'
-        ? await exportGifLocally(file, recipe(), duration, setExportProgress, controller.signal)
-        : await exportMp4Locally(file, recipe(), duration, setExportProgress, controller.signal);
-      if (!controller.signal.aborted) {
-        setDownloadUrl(URL.createObjectURL(output));
-        setDownloadFormat(exportFormat);
+      while (true) {
+        const job = exportJobsRef.current.find((item) => item.status === 'queued');
+        if (!job) break;
+
+        const controller = new AbortController();
+        exportControllers.current.set(job.id, controller);
+        updateExportJobs((current) => current.map((item) => (
+          item.id === job.id ? { ...item, status: 'exporting', progress: 0 } : item
+        )));
+
+        try {
+          const output = job.format === 'gif'
+            ? await exportGifLocally(
+              job.file,
+              job.recipe,
+              job.duration,
+              (progress) => updateExportJobs((current) => current.map((item) => (
+                item.id === job.id ? { ...item, progress } : item
+              ))),
+              controller.signal,
+            )
+            : await exportMp4Locally(
+              job.file,
+              job.recipe,
+              job.duration,
+              (progress) => updateExportJobs((current) => current.map((item) => (
+                item.id === job.id ? { ...item, progress } : item
+              ))),
+              controller.signal,
+            );
+          if (!controller.signal.aborted) {
+            downloadExport(output, job.fileName);
+            removeExportJob(job.id);
+          }
+        } catch (exportError) {
+          updateExportJobs((current) => current.flatMap((item) => {
+            if (item.id !== job.id) return [item];
+            if (item.dismissed) return [];
+            return [{
+              ...item,
+              status: 'error',
+              error: controller.signal.aborted
+                ? 'Export cancelled.'
+                : exportError instanceof Error ? exportError.message : `Could not export ${job.format.toUpperCase()}.`,
+            }];
+          }));
+        } finally {
+          exportControllers.current.delete(job.id);
+        }
       }
-    } catch (exportError) {
-      setError(controller.signal.aborted
-        ? 'Export cancelled.'
-        : exportError instanceof Error ? exportError.message : 'Could not export this GIF.');
     } finally {
-      if (exportController.current === controller) exportController.current = null;
-      setBusy(false);
+      exportQueueRunning.current = false;
     }
   }
 
-  function cancelExport() {
-    exportController.current?.abort();
+  function startExport() {
+    if (!file || !segments.length || !sourceDimensionsValid) return;
+    const format = exportFormat;
+    const baseName = mediaName.replace(/\.[^.]+$/, '') || 'onboard';
+    const job: ExportJob = {
+      id: crypto.randomUUID(),
+      file,
+      recipe: {
+        segments: segments.map((segment) => ({ ...segment })),
+        rotation,
+        crop: { ...crop },
+        adjustments: { ...adjustments },
+      },
+      duration,
+      format,
+      fileName: `${baseName}.${format}`,
+      status: 'queued',
+      progress: 0,
+    };
+    setError('');
+    updateExportJobs((current) => [...current, job]);
+    void processExportQueue();
   }
 
   function saveCurrentLook() {
@@ -1374,61 +1478,81 @@ export function OnboardEditor() {
             <span>Untitled {exportFormat.toUpperCase()}</span>
           )}
         </div>
-        {busy ? (
-            <div className="export-status" aria-live="polite">
-              <div className="progress-track"><span style={{ width: `${exportProgress}%` }} /></div>
-              <span className="export-progress-label">{exportFormat.toUpperCase()} · {exportProgress < 5 ? 'Loading editor' : 'Encoding'} · {exportProgress}%</span>
-              <button className="export-cancel" type="button" onClick={cancelExport}>Cancel</button>
-            </div>
-          ) : (
-            <div className="export-dropdown" ref={exportMenuRef}>
-              {downloadUrl && downloadFormat === exportFormat ? (
-                <a
-                  className="export-button ready"
-                  href={downloadUrl}
-                  download={`${mediaName.replace(/\.[^.]+$/, '') || 'onboard'}.${exportFormat}`}
-                >
-                  <Check size={15} /> Download {exportFormat.toUpperCase()}
-                </a>
-              ) : (
-                <button
-                  className="export-button"
-                  type="button"
-                  onClick={startExport}
-                  disabled={!file || !duration || !sourceDimensionsValid || !segments.length}
-                >
-                  <Download size={15} /> Export {exportFormat.toUpperCase()}
-                </button>
-              )}
-              <button
-                className="export-dropdown-toggle"
-                type="button"
-                aria-label="Choose export format"
-                aria-haspopup="menu"
-                aria-expanded={exportMenuOpen}
-                onClick={() => setExportMenuOpen((open) => !open)}
-              >
-                <ChevronDown size={15} />
-              </button>
-              {exportMenuOpen && (
-                <div className="export-format-menu" role="menu" aria-label="Export format">
-                  {(['gif', 'mp4'] as const).map((format) => (
+        <div className="header-export-area">
+          <div className="export-dropdown" ref={exportMenuRef}>
+            <button
+              className="export-button"
+              type="button"
+              onClick={startExport}
+              disabled={!file || !duration || !sourceDimensionsValid || !segments.length}
+            >
+              <Download size={15} /> Export {exportFormat.toUpperCase()}
+            </button>
+            <button
+              className="export-dropdown-toggle"
+              type="button"
+              aria-label="Choose export format"
+              aria-haspopup="menu"
+              aria-expanded={exportMenuOpen}
+              onClick={() => setExportMenuOpen((open) => !open)}
+            >
+              <ChevronDown size={15} />
+            </button>
+            {exportMenuOpen && (
+              <div className="export-format-menu" role="menu" aria-label="Export format">
+                {(['gif', 'mp4'] as const).map((format) => (
+                  <button
+                    className="export-format-option"
+                    key={format}
+                    type="button"
+                    role="menuitemradio"
+                    aria-checked={exportFormat === format}
+                    onClick={() => chooseExportFormat(format)}
+                  >
+                    {format === exportFormat && <Check size={14} />}
+                    <span>Export as {format.toUpperCase()}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          {exportJobs.some((job) => !job.dismissed) && (
+            <section className="export-queue" aria-label="Export queue" aria-live="polite">
+              {exportJobs.filter((job) => !job.dismissed).map((job) => (
+                <article className={`export-queue-item${job.status === 'error' ? ' error' : ''}`} key={job.id}>
+                  <div className="export-queue-heading">
+                    <div className="export-queue-copy">
+                      <strong>{job.fileName}</strong>
+                      <span>
+                        {job.status === 'queued'
+                          ? `Queued · ${job.format.toUpperCase()}`
+                          : job.status === 'exporting'
+                            ? `Exporting ${job.format.toUpperCase()} · ${job.progress}%`
+                            : job.error}
+                      </span>
+                    </div>
                     <button
-                      className="export-format-option"
-                      key={format}
+                      className="export-queue-close"
                       type="button"
-                      role="menuitemradio"
-                      aria-checked={exportFormat === format}
-                      onClick={() => chooseExportFormat(format)}
+                      aria-label={`Dismiss ${job.fileName} export notification`}
+                      onClick={() => dismissExportJob(job.id)}
                     >
-                      {format === exportFormat && <Check size={14} />}
-                      <span>Export as {format.toUpperCase()}</span>
+                      <X size={15} />
                     </button>
-                  ))}
-                </div>
-              )}
-            </div>
+                  </div>
+                  {job.status === 'exporting' ? (
+                    <>
+                      <div className="progress-track"><span style={{ width: `${job.progress}%` }} /></div>
+                      <button className="export-cancel" type="button" onClick={() => cancelExport(job.id)}>Cancel export</button>
+                    </>
+                  ) : job.status === 'queued' ? (
+                    <div className="progress-track"><span className="export-queue-indeterminate" /></div>
+                  ) : null}
+                </article>
+              ))}
+            </section>
           )}
+        </div>
       </header>
 
       <section className="editor-main" aria-label="Video editor">
@@ -1804,8 +1928,11 @@ export function OnboardEditor() {
         <div className="timeline-toolbar">
           <div className="timeline-title">
             <strong>Timeline</strong>
-            <span className="timeline-time" aria-label={`Current time ${formatTimecode(currentTime)}, total duration ${formatTimecode(duration)}`}>
+            <span className="timeline-time" aria-label={`Current time ${formatTimecode(currentTime)}, source duration ${formatTimecode(duration)}`}>
               {formatTimecode(currentTime)} / {formatTimecode(duration)}
+            </span>
+            <span className="timeline-total" aria-label={`Edited output duration ${formatTimecode(editedDuration)}`}>
+              {formatTimecode(editedDuration)} total
             </span>
           </div>
           <button className="transport-button" type="button" aria-label={playing ? 'Pause video' : 'Play video'} onClick={() => void togglePlayback()} disabled={!file}>
@@ -2102,6 +2229,21 @@ function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
+function downloadExport(output: Blob, fileName: string) {
+  const url = URL.createObjectURL(output);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = fileName.replace(/[\\/:*?"<>|]+/g, '-');
+  anchor.style.display = 'none';
+  document.body.append(anchor);
+  try {
+    anchor.click();
+  } finally {
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  }
+}
+
 function formatAspectRatio(aspectRatio: number) {
   const knownRatios = [
     [1, '1:1'],
@@ -2114,16 +2256,13 @@ function formatAspectRatio(aspectRatio: number) {
 }
 
 function formatTime(seconds: number) {
-  const safeSeconds = Math.max(0, seconds);
-  const minutes = Math.floor(safeSeconds / 60);
-  const remaining = safeSeconds - minutes * 60;
-  return `${String(minutes).padStart(2, '0')}:${remaining.toFixed(1).padStart(4, '0')}`;
+  return formatTimecode(seconds);
 }
 
 function formatTimecode(seconds: number) {
-  const safeSeconds = Math.max(0, seconds);
-  const minutes = Math.floor(safeSeconds / 60);
-  const wholeSeconds = Math.floor(safeSeconds % 60);
-  const milliseconds = Math.floor((safeSeconds % 1) * 1000);
-  return `${String(minutes).padStart(2, '0')}:${String(wholeSeconds).padStart(2, '0')}:${String(milliseconds).padStart(3, '0')}`;
+  const centiseconds = Math.round(Math.max(0, seconds) * 100);
+  const minutes = Math.floor(centiseconds / 6000);
+  const wholeSeconds = Math.floor((centiseconds % 6000) / 100);
+  const fractionalSeconds = centiseconds % 100;
+  return `${String(minutes).padStart(2, '0')}:${String(wholeSeconds).padStart(2, '0')}:${String(fractionalSeconds).padStart(2, '0')}`;
 }

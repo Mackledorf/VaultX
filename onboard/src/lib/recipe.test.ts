@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildGifFilter, buildMp4Filter, buildPreviewTransferTable, isTimeInSegments, normalizeEditRecipe, validateSourceDimensions } from './recipe';
+import { buildGifFilter, buildMp4Filter, buildPreviewTransferTable, getEditedDuration, isTimeInSegments, normalizeEditRecipe, validateSourceDimensions } from './recipe';
 import type { VideoEditRecipe } from '../types';
 
 const baseRecipe: VideoEditRecipe = {
@@ -147,4 +147,11 @@ test('identifies playhead positions inside kept segments, excluding removed gaps
   assert.equal(isTimeInSegments(4, segments), false);
   assert.equal(isTimeInSegments(5, segments), true);
   assert.equal(isTimeInSegments(8, segments), false);
+});
+
+test('calculates output duration after segment playback speeds are applied', () => {
+  assert.equal(getEditedDuration([
+    { startTime: 0, endTime: 2, playbackRate: 2 },
+    { startTime: 4, endTime: 7, playbackRate: 1.5 },
+  ]), 3);
 });

@@ -76,13 +76,14 @@ Onboard is not a drive, media library, or place to upload and save source files 
 - Accept MP4 video selected from the user's device and provide an in-page preview.
 - Keep the workflow local and temporary. Do not add a media library, account, cloud upload, VaultX API call, or persistent source-file storage.
 - Do not set arbitrary input file-size or source-duration limits. Support the media the user's device can practically process; if browser, memory, codec, or output-format constraints prevent an operation, explain the actual constraint clearly.
-- Export the edited video as a short-format GIF and let the user download it to their Downloads. Do not treat export as an upload or library save.
+- Queue exports from a snapshot of the current source and edits, automatically download each finished output, and allow the user to continue editing another video while exports run. Show dismissible progress notifications under the Export control; completed notifications disappear automatically. Do not treat export as an upload or library save.
+- Preserve FFmpeg diagnostic logs and show specific, bounded explanations for source decoding, edit-filter, GIF palette, memory, timeout, and other export failures. Do not imply an arbitrary trim-duration limit or claim a source file is damaged without supporting diagnostics.
 - Preserve visual quality as much as GIF's palette and practical output constraints permit; explain meaningful format trade-offs rather than implying GIF can retain every property of the MP4.
 
 ### Timeline editing
 
 - Scrub through the footage in the timeline.
-- Show the current playhead time and total source duration beside the Timeline heading as `MM:SS:MMM / MM:SS:MMM` (minutes, seconds, milliseconds).
+- Show the current playhead time and total source duration beside the Timeline heading as `MM:SS:CC / MM:SS:CC` (minutes, seconds, centiseconds), followed by the retained, speed-adjusted output duration as `MM:SS:CC total`. Keep time readouts at two decimal places.
 - Show subtle tick marks at 25%, 50%, and 75% of the blank timeline track before a video is loaded.
 - Drag the playhead to scrub; clicking elsewhere on the timeline must not seek.
 - Update the video preview continuously while the playhead is dragged, not only after the drag ends.
@@ -91,7 +92,7 @@ Onboard is not a drive, media library, or place to upload and save source files 
 - Crop presets always show the crop-mark overlay.
 - After timeline trimming, hide the playhead, pause playback, and ignore video time updates until playback resumes. Park at the first kept section; the playhead returns only when playback resumes from there.
 - While dragging a trim handle, continuously preview the frame at the moving trim boundary; after release, briefly show that frame before restoring the prior playhead position.
-- Playback should cross contiguous cut boundaries without seeking or pausing; skip removed gaps and continue playback.
+- Playback should cross contiguous cut boundaries without seeking or pausing, adjusting the playback rate at frame boundaries; skip removed gaps and continue playback.
 - Cut is a single-click action that splits the section at the current playhead position; it is not a toggle or timeline click mode.
 - Before the first cut, do not allow section selection; keep trim handles available on the single section.
 - After a cut creates multiple sections, make the section under the playhead the active editing section: show its trim handles and highlight those handles rather than filling the whole section. Scrubbing or playback into another section transfers the active trim handles and per-section speed target to that section. Remove the active section, falling back to the last selected section only when the playhead is outside kept footage.

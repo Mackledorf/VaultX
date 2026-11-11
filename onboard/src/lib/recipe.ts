@@ -105,6 +105,13 @@ export function isTimeInSegments(time: number, segments: VideoEditRecipe['segmen
   return segments.some((segment) => time >= segment.startTime && time < segment.endTime);
 }
 
+export function getEditedDuration(segments: VideoEditRecipe['segments']) {
+  return segments.reduce(
+    (total, segment) => total + (segment.endTime - segment.startTime) / segment.playbackRate,
+    0,
+  );
+}
+
 export function buildGifFilter(recipe: VideoEditRecipe) {
   const segmentFilters = buildVideoSegmentFilters(recipe, 15);
   segmentFilters.push('[joined]split[gifsrc][palettesrc]');

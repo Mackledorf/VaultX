@@ -4,6 +4,7 @@ import coreURL from '@ffmpeg/core?url';
 import wasmURL from '@ffmpeg/core/wasm?url';
 import type { VideoEditRecipe } from '../types';
 import { buildGifFilter, buildMp4Filter, normalizeEditRecipe } from './recipe';
+import { describeFfmpegFailure } from './exportDiagnostics';
 
 export async function exportGif(
   file: File,
@@ -44,17 +45,35 @@ async function exportWithFfmpeg(
   const onFfmpegProgress = ({ progress }: { progress: number }) => {
     if (Number.isFinite(progress)) onProgress(Math.max(5, Math.min(95, Math.round(5 + progress * 90))));
   };
+  const ffmpegLogs: string[] = [];
+  const onFfmpegLog = ({ message }: { message: string }) => {
+    ffmpegLogs.push(message);
+    if (ffmpegLogs.length > 200) ffmpegLogs.shift();
+  };
   signal.addEventListener('abort', onAbort, { once: true });
   ffmpeg.on('progress', onFfmpegProgress);
+  ffmpeg.on('log', onFfmpegLog);
 
   try {
     if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
     onProgress(1);
-    await ffmpeg.load({ coreURL, wasmURL });
+    try {
+      await ffmpeg.load({ coreURL, wasmURL });
+    } catch (loadError) {
+      if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
+      const message = loadError instanceof Error ? loadError.message : String(loadError);
+      throw new Error(`Could not initialize the local video encoder. Check that the page can load its bundled FFmpeg files and retry. Details: ${message}`);
+    }
     if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
 
     const normalizedRecipe = normalizeEditRecipe(recipe, sourceDuration);
-    await ffmpeg.writeFile(inputPath, await fetchFile(file));
+    try {
+      await ffmpeg.writeFile(inputPath, await fetchFile(file));
+    } catch (sourceError) {
+      if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
+      const message = sourceError instanceof Error ? sourceError.message : String(sourceError);
+      throw new Error(`Could not prepare the source video for local encoding. The source could not be read into the browser encoder. Details: ${message}`);
+    }
     if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
     onProgress(5);
 
@@ -81,11 +100,27 @@ async function exportWithFfmpeg(
         '-f', 'mp4',
         outputPath,
       ];
-    const exitCode = await ffmpeg.exec(args, 10 * 60 * 1000);
+    let exitCode: number;
+    try {
+      exitCode = await ffmpeg.exec(args, 10 * 60 * 1000);
+    } catch (executionError) {
+      if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
+      const errorMessage = executionError instanceof Error ? executionError.message : String(executionError);
+      if (/timeout|time limit/i.test(errorMessage)) {
+        throw new Error(`Export timed out after 10 minutes. The browser could not finish processing this video within the encoder's execution limit.`);
+      }
+      throw new Error(describeFfmpegFailure(format, null, ffmpegLogs, errorMessage));
+    }
     if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
-    if (exitCode !== 0) throw new Error(`${format.toUpperCase()} export failed. Try a shorter trim or a smaller crop.`);
+    if (exitCode !== 0) throw new Error(describeFfmpegFailure(format, exitCode, ffmpegLogs));
 
-    const output = await ffmpeg.readFile(outputPath);
+    let output: Uint8Array | string;
+    try {
+      output = await ffmpeg.readFile(outputPath);
+    } catch (readError) {
+      const message = readError instanceof Error ? readError.message : String(readError);
+      throw new Error(`FFmpeg finished encoding but the browser could not read the exported file. Details: ${message}`);
+    }
     if (typeof output === 'string' || output.byteLength === 0) {
       throw new Error(`${format.toUpperCase()} export produced no output.`);
     }
@@ -103,6 +138,7 @@ async function exportWithFfmpeg(
   } finally {
     signal.removeEventListener('abort', onAbort);
     ffmpeg.off('progress', onFfmpegProgress);
+    ffmpeg.off('log', onFfmpegLog);
     ffmpeg.terminate();
   }
 }
