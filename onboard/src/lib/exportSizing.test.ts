@@ -13,9 +13,10 @@ test('defines hard byte ceilings for both export formats', () => {
   assert.equal(MAX_EXPORT_BYTES.mp4, 20_000_000);
 });
 
-test('uses progressively smaller fallback profiles for GIF size control', () => {
-  assert.deepEqual(GIF_FALLBACK_PROFILES.map(({ frameRate }) => frameRate), [15, 12, 10, 8]);
-  assert.deepEqual(GIF_FALLBACK_PROFILES.map(({ maxDimension }) => maxDimension), [960, 720, 480, 320]);
+test('preserves GIF frame rate while progressively reducing palette and image dimensions', () => {
+  assert.ok(GIF_FALLBACK_PROFILES.every(({ frameRate }) => frameRate === 15));
+  assert.deepEqual(GIF_FALLBACK_PROFILES.map(({ maxColors }) => maxColors), [192, 128, 128, 96, 64]);
+  assert.deepEqual(GIF_FALLBACK_PROFILES.map(({ maxDimension }) => maxDimension ?? null), [null, null, 960, 720, 480]);
 });
 
 test('reduces MP4 fallback bitrate within the output budget and rejects unusably low targets', () => {

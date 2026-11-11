@@ -3,6 +3,7 @@ export type ExportFormat = 'gif' | 'mp4';
 export type GifEncodingProfile = {
   frameRate: number;
   maxDimension?: number;
+  maxColors: number;
   dither: string;
 };
 
@@ -17,10 +18,11 @@ export const MAX_EXPORT_BYTES: Record<ExportFormat, number> = {
 };
 
 export const GIF_FALLBACK_PROFILES: GifEncodingProfile[] = [
-  { frameRate: 15, maxDimension: 960, dither: 'bayer:bayer_scale=3' },
-  { frameRate: 12, maxDimension: 720, dither: 'bayer:bayer_scale=3' },
-  { frameRate: 10, maxDimension: 480, dither: 'bayer:bayer_scale=3' },
-  { frameRate: 8, maxDimension: 320, dither: 'bayer:bayer_scale=3' },
+  { frameRate: 15, maxColors: 192, dither: 'bayer:bayer_scale=3' },
+  { frameRate: 15, maxColors: 128, dither: 'bayer:bayer_scale=3' },
+  { frameRate: 15, maxDimension: 960, maxColors: 128, dither: 'bayer:bayer_scale=3' },
+  { frameRate: 15, maxDimension: 720, maxColors: 96, dither: 'bayer:bayer_scale=3' },
+  { frameRate: 15, maxDimension: 480, maxColors: 64, dither: 'bayer:bayer_scale=3' },
 ];
 
 export const MP4_FALLBACK_PROFILES: Mp4EncodingProfile[] = [

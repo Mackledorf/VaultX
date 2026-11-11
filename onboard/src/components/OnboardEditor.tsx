@@ -2,6 +2,7 @@ import { type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent,
 import { ArrowDownUp, Check, ChevronDown, Copy, Crop, Download, Link2, List, Pause, Play, RefreshCw, RotateCw, Scissors, Trash2, Upload, X } from 'lucide-react';
 import { exportGif as exportGifLocally, exportMp4 as exportMp4Locally } from '../lib/editor';
 import { MAX_EXPORT_BYTES } from '../lib/exportSizing';
+import { getPlaybackTransition } from '../lib/playback';
 import { buildPreviewTransferTable, getEditedDuration, isIncreaseOnlyAdjustment, isTimeInSegments, preflightExport, validateSourceDimensions } from '../lib/recipe';
 import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
 import type { VideoEditRecipe } from '../types';
@@ -85,6 +86,7 @@ export function OnboardEditor() {
     startY: number;
   } | null>(null);
   const frameDurationRef = useRef(DEFAULT_FRAME_DURATION);
+  const pendingPlaybackTransitionRef = useRef<{ resume: boolean } | null>(null);
   const globalKeyHandlerRef = useRef<(event: KeyboardEvent) => void>(() => {});
   const arrowScrubRef = useRef<{
     direction: -1 | 1;
@@ -170,38 +172,23 @@ export function OnboardEditor() {
         }
       }
       previousFrame = { mediaTime: metadata.mediaTime, presentedFrames: metadata.presentedFrames };
-      if (!video.paused && !playheadHiddenAfterTrimRef.current) {
+      if (!video.paused && !playheadHiddenAfterTrimRef.current && !pendingPlaybackTransitionRef.current) {
         const currentSegments = segmentsRef.current;
-        const segmentIndex = currentSegments.findIndex((segment) => (
-          metadata.mediaTime >= segment.startTime && metadata.mediaTime < segment.endTime
-        ));
-        if (segmentIndex >= 0) {
-          const currentSegment = currentSegments[segmentIndex];
-          const followingSegment = currentSegments[segmentIndex + 1];
-          setSelectedSegmentIndex(segmentIndex);
-          if (video.playbackRate !== currentSegment.playbackRate) {
-            video.playbackRate = currentSegment.playbackRate;
+        const transition = getPlaybackTransition(
+          metadata.mediaTime,
+          frameDurationRef.current,
+          currentSegments,
+        );
+        if (transition?.type === 'rate') {
+          if (video.playbackRate !== transition.playbackRate) {
+            video.playbackRate = transition.playbackRate;
           }
-          const frameAdvance = frameDurationRef.current * video.playbackRate;
-          if (metadata.mediaTime + frameAdvance >= currentSegment.endTime) {
-            if (followingSegment && followingSegment.startTime <= currentSegment.endTime + frameDurationRef.current / 4) {
-              video.playbackRate = followingSegment.playbackRate;
-            } else {
-              const nextSegment = followingSegment ?? currentSegments[0];
-              if (nextSegment) {
-                video.currentTime = nextSegment.startTime;
-                video.playbackRate = nextSegment.playbackRate;
-                setCurrentTime(nextSegment.startTime);
-              }
-            }
-          }
-        } else {
-          const nextSegment = currentSegments.find((segment) => segment.startTime > metadata.mediaTime) ?? currentSegments[0];
-          if (nextSegment) {
-            video.currentTime = nextSegment.startTime;
-            video.playbackRate = nextSegment.playbackRate;
-            setCurrentTime(nextSegment.startTime);
-          }
+        } else if (transition?.type === 'seek') {
+          pendingPlaybackTransitionRef.current = { resume: !video.paused };
+          video.playbackRate = transition.playbackRate;
+          video.currentTime = transition.time;
+          setSelectedSegmentIndex(transition.segmentIndex);
+          setCurrentTime(transition.time);
         }
       }
       callbackId = video.requestVideoFrameCallback(observeFrame);
@@ -630,46 +617,39 @@ export function OnboardEditor() {
     const video = videoRef.current;
     if (!video || playheadHiddenAfterTrimRef.current) return;
     const time = video.currentTime;
-    const boundaryTolerance = Math.min(0.005, frameDurationRef.current / 4);
-    let segmentIndex = segments.findIndex((segment) => time >= segment.startTime && time < segment.endTime);
-    if (segmentIndex < 0) {
-      segmentIndex = segments.findIndex((segment, index) => (
-        index > 0
-        && Math.abs(time - segment.startTime) <= boundaryTolerance
-        && Math.abs(segments[index - 1].endTime - segment.startTime) <= boundaryTolerance
-      ));
-    }
+    const segmentIndex = segments.findIndex((segment) => (
+      time >= segment.startTime && time < segment.endTime
+    ));
     if (segmentIndex >= 0) {
       if (segmentIndex !== selectedSegmentIndex) setSelectedSegmentIndex(segmentIndex);
       if (video.playbackRate !== segments[segmentIndex].playbackRate) {
         video.playbackRate = segments[segmentIndex].playbackRate;
       }
     }
-    if (!video.paused && segmentIndex >= 0 && time >= segments[segmentIndex].endTime - boundaryTolerance) {
-      const currentSegment = segments[segmentIndex];
-      const followingSegment = segments[segmentIndex + 1];
-      if (followingSegment && followingSegment.startTime <= currentSegment.endTime + boundaryTolerance) {
-        setCurrentTime(time);
-        return;
-      }
-      const nextSegment = followingSegment ?? segments[0];
-      if (nextSegment) {
-        video.currentTime = nextSegment.startTime;
-        video.playbackRate = nextSegment.playbackRate;
-        setCurrentTime(nextSegment.startTime);
-      }
-      return;
-    }
-    if (!video.paused && segmentIndex === -1) {
-      const nextSegment = segments.find((segment) => segment.startTime > time + boundaryTolerance) ?? segments[0];
-      if (nextSegment) {
-        video.currentTime = nextSegment.startTime;
-        video.playbackRate = nextSegment.playbackRate;
-        setCurrentTime(nextSegment.startTime);
-      }
-      return;
-    }
     setCurrentTime(time);
+  }
+
+  function onVideoSeeked() {
+    const video = videoRef.current;
+    const transition = pendingPlaybackTransitionRef.current;
+    if (!video || !transition) return;
+    pendingPlaybackTransitionRef.current = null;
+    if (!transition.resume) return;
+    if (!video.paused) {
+      setPlaying(true);
+      return;
+    }
+    void video.play().then(() => {
+      setPlaying(true);
+    }).catch(() => {
+      setPlaying(false);
+      setError('Could not continue playing this video in the browser.');
+    });
+  }
+
+  function onVideoPause() {
+    if (pendingPlaybackTransitionRef.current?.resume) return;
+    setPlaying(false);
   }
 
   function onVideoEnded() {
@@ -1414,9 +1394,8 @@ export function OnboardEditor() {
     height: `${crop.height * 100}%`,
   };
   const excludedRanges: Array<{ startTime: number; endTime: number }> = [];
-  const cutMarks = segments.slice(1).flatMap((segment, index) => (
-    Math.abs(segments[index].endTime - segment.startTime) < 0.001 ? [segment.startTime] : []
-  ));
+  const clipBoundaryMarks = [...new Set(segments.flatMap((segment) => [segment.startTime, segment.endTime]))]
+    .filter((time) => time > 0 && time < duration);
   const playheadSegmentIndex = segments.findIndex((segment) => isTimeInSegments(currentTime, [segment]));
   const activeTimelineSegmentIndex = playheadSegmentIndex >= 0 ? playheadSegmentIndex : selectedSegmentIndex;
   if (duration > 0) {
@@ -1802,7 +1781,8 @@ export function OnboardEditor() {
                   onLoadedData={onVideoDataReady}
                   onTimeUpdate={onTimeUpdate}
                   onPlay={() => setPlaying(true)}
-                  onPause={() => setPlaying(false)}
+                  onPause={onVideoPause}
+                  onSeeked={onVideoSeeked}
                   onEnded={onVideoEnded}
                 />
                 {cropOverlayVisible && (
@@ -2001,7 +1981,7 @@ export function OnboardEditor() {
               }}
             />
           ))}
-          {cutMarks.map((time) => (
+          {clipBoundaryMarks.map((time) => (
             <span
               key={`cut-${time}`}
               className="timeline-cut-mark"

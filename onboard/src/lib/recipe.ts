@@ -133,11 +133,12 @@ export function getEditedDuration(segments: VideoEditRecipe['segments']) {
 
 export function buildGifFilter(
   recipe: VideoEditRecipe,
-  options: { frameRate?: number; maxDimension?: number; dither?: string } = {},
+  options: { frameRate?: number; maxDimension?: number; maxColors?: number; dither?: string } = {},
 ) {
   const segmentFilters = buildVideoSegmentFilters(recipe, options.frameRate ?? 15, options.maxDimension);
   segmentFilters.push('[joined]split[gifsrc][palettesrc]');
-  segmentFilters.push('[palettesrc]palettegen=stats_mode=diff[palette]');
+  const maxColors = options.maxColors === undefined ? '' : `:max_colors=${options.maxColors}`;
+  segmentFilters.push(`[palettesrc]palettegen=stats_mode=diff${maxColors}[palette]`);
   segmentFilters.push(`[gifsrc][palette]paletteuse=dither=${options.dither ?? 'sierra2_4a'}[out]`);
   return segmentFilters.join(';');
 }

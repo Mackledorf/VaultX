@@ -88,15 +88,17 @@ test('builds a GIF filter with cuts, rotations, crop, adjustments, and palette o
   assert.match(filter, /paletteuse=dither=sierra2_4a/);
 });
 
-test('uses lower frame rates, dimensions, and stable dithering for GIF size fallbacks', () => {
+test('preserves frame rate while reducing GIF palette and image dimensions in fallbacks', () => {
   const filter = buildGifFilter(baseRecipe, {
-    frameRate: 10,
+    frameRate: 15,
     maxDimension: 480,
+    maxColors: 64,
     dither: 'bayer:bayer_scale=3',
   });
 
   assert.match(filter, /scale=w='min\(iw,480\)'/);
-  assert.match(filter, /fps=10,scale=w='min\(iw,480\)'/);
+  assert.match(filter, /fps=15,scale=w='min\(iw,480\)'/);
+  assert.match(filter, /palettegen=stats_mode=diff:max_colors=64/);
   assert.match(filter, /paletteuse=dither=bayer:bayer_scale=3/);
 });
 

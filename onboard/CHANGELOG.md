@@ -4,6 +4,18 @@ This log records product and interface iterations so prior decisions can be unde
 
 ## 2026-11-11
 
+### Preserved GIF frame rate in size fallbacks
+
+- Kept GIF size fallback encoding at 15 fps and reduced palette colors before lowering image dimensions.
+- Rationale: prioritize motion smoothness over color/detail when fitting GIFs under the output size cap.
+
+### Improved clip boundaries and timeline contrast
+
+- Darkened removed timeline ranges, gave the active clip a subtle accent tint, and added boundary ticks at every retained clip start and end.
+- Consolidated playback transitions in presented-frame callbacks, based the next-frame boundary check on source-media timestamps, and prevented duplicate time-update seeks.
+- Resume playback after a clip-boundary seek if the browser pauses during decoding.
+- Rationale: improve clip separation and prevent playback from running past trim edges, jittering, or stopping after a seek between retained sections.
+
 ### Bounded export sizes and moved work off discarded frames
 
 - Enforced maximum outputs of 5 MB (5,000,000 bytes) for GIF and 20 MB (20,000,000 bytes) for MP4, preserving the existing quality settings when they fit and trying quality-reduction steps otherwise. Exports that still exceed the cap at the minimum supported profile fail with edit suggestions instead of downloading an oversized file.
