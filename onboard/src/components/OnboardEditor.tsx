@@ -1,5 +1,5 @@
 import { type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown, Copy, Crop, Download, Link2, List, Pause, Play, RefreshCw, RotateCw, Scissors, Upload } from 'lucide-react';
+import { Check, ChevronDown, Copy, Crop, Download, Link2, List, Pause, Play, RefreshCw, RotateCw, Scissors, Trash2, Upload } from 'lucide-react';
 import { exportGif as exportGifLocally, exportMp4 as exportMp4Locally } from '../lib/editor';
 import { buildPreviewTransferTable, isTimeInSegments, validateSourceDimensions } from '../lib/recipe';
 import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
@@ -65,6 +65,7 @@ export function OnboardEditor() {
   const arrowScrubRef = useRef<{ direction: -1 | 1; frameId: number } | null>(null);
   const initialFrameReadyRef = useRef(false);
   const trimPreviewTimeoutRef = useRef<number | null>(null);
+  const savedLookClickTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const undoHistoryRef = useRef<EditorSnapshot[]>([]);
   const redoHistoryRef = useRef<EditorSnapshot[]>([]);
   const editGestureRef = useRef(false);
@@ -109,6 +110,7 @@ export function OnboardEditor() {
   const [savedLooksVisible, setSavedLooksVisible] = useState(false);
   const [savingLook, setSavingLook] = useState(false);
   const [activeSavedLookId, setActiveSavedLookId] = useState<string | null>(null);
+  const [deletingSavedLookId, setDeletingSavedLookId] = useState<string | null>(null);
   const [exportProgress, setExportProgress] = useState(0);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
@@ -550,6 +552,7 @@ export function OnboardEditor() {
     const time = video.currentTime;
     const segmentIndex = segments.findIndex((segment) => time >= segment.startTime && time < segment.endTime);
     if (segmentIndex >= 0) {
+      if (segmentIndex !== selectedSegmentIndex) setSelectedSegmentIndex(segmentIndex);
       if (video.playbackRate !== segments[segmentIndex].playbackRate) {
         video.playbackRate = segments[segmentIndex].playbackRate;
       }
@@ -590,6 +593,7 @@ export function OnboardEditor() {
     }
     video.currentTime = firstSegment.startTime;
     video.playbackRate = firstSegment.playbackRate;
+    setSelectedSegmentIndex(0);
     setCurrentTime(firstSegment.startTime);
     void video.play().catch(() => {
       setPlaying(false);
@@ -640,6 +644,7 @@ export function OnboardEditor() {
     const activeIndex = segments.findIndex((segment) => resolvedTime >= segment.startTime && resolvedTime < segment.endTime);
     if (activeIndex >= 0) {
       video.playbackRate = segments[activeIndex].playbackRate;
+      setSelectedSegmentIndex(activeIndex);
     }
     setCurrentTime(resolvedTime);
   }
@@ -863,11 +868,12 @@ export function OnboardEditor() {
   }
 
   function removeSelectedSegment() {
-    if (segments.length <= 1 || !segments[selectedSegmentIndex]) return;
+    const activeIndex = segments.findIndex((segment) => isTimeInSegments(currentTime, [segment]));
+    const targetIndex = activeIndex >= 0 ? activeIndex : selectedSegmentIndex;
+    if (segments.length <= 1 || !segments[targetIndex]) return;
     recordEdit();
-    const removed = segments[selectedSegmentIndex];
-    const next = segments.filter((_, index) => index !== selectedSegmentIndex);
-    const nextIndex = Math.min(selectedSegmentIndex, next.length - 1);
+    const next = segments.filter((_, index) => index !== targetIndex);
+    const nextIndex = Math.min(targetIndex, next.length - 1);
     setSegments(next);
     setSelectedSegmentIndex(nextIndex);
     const nextTime = next[nextIndex].startTime;
@@ -882,16 +888,19 @@ export function OnboardEditor() {
   }
 
   function selectedSegment() {
-    return segments[selectedSegmentIndex];
+    const activeIndex = segments.findIndex((segment) => isTimeInSegments(currentTime, [segment]));
+    return segments[activeIndex >= 0 ? activeIndex : selectedSegmentIndex];
   }
 
   function setSelectedSegmentSpeed(playbackRate: number) {
     const segment = selectedSegment();
     if (!segment) return;
     if (segment.playbackRate === playbackRate) return;
+    const activeIndex = segments.findIndex((item) => item === segment);
+    if (activeIndex < 0) return;
     recordEdit();
     setSegments((current) => current.map((segment, index) => (
-      index === selectedSegmentIndex ? { ...segment, playbackRate } : segment
+      index === activeIndex ? { ...segment, playbackRate } : segment
     )));
     if (videoRef.current && currentTime >= segment.startTime && currentTime < segment.endTime) {
       videoRef.current.playbackRate = playbackRate;
@@ -928,7 +937,10 @@ export function OnboardEditor() {
     const activeIndex = segments.findIndex((segment) => (
       resolvedTime >= segment.startTime && resolvedTime < segment.endTime
     ));
-    if (activeIndex >= 0) video.playbackRate = segments[activeIndex].playbackRate;
+    if (activeIndex >= 0) {
+      video.playbackRate = segments[activeIndex].playbackRate;
+      setSelectedSegmentIndex(activeIndex);
+    }
     setCurrentTime(resolvedTime);
   }
 
@@ -1018,6 +1030,7 @@ export function OnboardEditor() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
       window.removeEventListener('blur', handleWindowBlur);
+      clearSavedLookClickTimeout();
       stopArrowScrub();
     };
   }, []);
@@ -1114,6 +1127,37 @@ export function OnboardEditor() {
     setActiveSavedLookId(look.id);
   }
 
+  function clearSavedLookClickTimeout() {
+    if (savedLookClickTimeoutRef.current !== null) {
+      clearTimeout(savedLookClickTimeoutRef.current);
+      savedLookClickTimeoutRef.current = null;
+    }
+  }
+
+  function queueSavedLookApply(look: SavedLook, clickCount: number) {
+    clearSavedLookClickTimeout();
+    if (clickCount === 0) {
+      applySavedLook(look);
+      return;
+    }
+    if (clickCount !== 1) return;
+    savedLookClickTimeoutRef.current = setTimeout(() => {
+      savedLookClickTimeoutRef.current = null;
+      applySavedLook(look);
+    }, 400);
+  }
+
+  function toggleSavedLookDelete(lookId: string) {
+    clearSavedLookClickTimeout();
+    setDeletingSavedLookId((current) => current === lookId ? null : lookId);
+  }
+
+  function deleteSavedLook(lookId: string) {
+    setSavedLooks((current) => current.filter((look) => look.id !== lookId));
+    setActiveSavedLookId((current) => current === lookId ? null : current);
+    setDeletingSavedLookId(null);
+  }
+
   const rotated = rotation % 180 !== 0;
   const previewTransferTable = buildPreviewTransferTable(adjustments)
     .map((value) => (value / 255).toFixed(6))
@@ -1133,10 +1177,8 @@ export function OnboardEditor() {
     height: `${crop.height * 100}%`,
   };
   const excludedRanges: Array<{ startTime: number; endTime: number }> = [];
-  const selectedTimelineSegment = segments[selectedSegmentIndex];
-  const playheadInSelectedSegment = selectedTimelineSegment !== undefined
-    && isTimeInSegments(currentTime, [selectedTimelineSegment]);
   const playheadSegmentIndex = segments.findIndex((segment) => isTimeInSegments(currentTime, [segment]));
+  const activeTimelineSegmentIndex = playheadSegmentIndex >= 0 ? playheadSegmentIndex : selectedSegmentIndex;
   if (duration > 0) {
     let keptThrough = 0;
     for (const segment of segments) {
@@ -1538,17 +1580,49 @@ export function OnboardEditor() {
             {savedLooksVisible ? (
               <div className="saved-look-gallery" aria-label="Saved frames">
                 {savedLooks.map((look, index) => (
-                  <button
-                    className={`saved-look${activeSavedLookId === look.id ? ' active' : ''}`}
-                    type="button"
-                    key={look.id}
-                    aria-label={`Apply saved adjustments ${index + 1} from ${formatTime(look.time)}`}
-                    aria-pressed={activeSavedLookId === look.id}
-                    onClick={() => applySavedLook(look)}
-                  >
-                    <img src={look.thumbnail} alt="" />
-                    <span>{formatTime(look.time)}</span>
-                  </button>
+                  <div className="saved-look-card" key={look.id}>
+                    <button
+                      className={`saved-look${activeSavedLookId === look.id ? ' active' : ''}`}
+                      type="button"
+                      aria-label={`Apply saved adjustments ${index + 1} from ${formatTime(look.time)}`}
+                      aria-pressed={activeSavedLookId === look.id}
+                      onClick={(event) => queueSavedLookApply(look, event.detail)}
+                      onDoubleClick={(event) => {
+                        event.preventDefault();
+                        toggleSavedLookDelete(look.id);
+                      }}
+                    >
+                      <img src={look.thumbnail} alt="" />
+                      <span>{formatTime(look.time)}</span>
+                    </button>
+                    {deletingSavedLookId === look.id && (
+                      <div
+                        className="saved-look-delete-overlay"
+                      >
+                        <button
+                          className="saved-look-delete-dismiss"
+                          type="button"
+                          aria-label={`Cancel deleting saved frame ${index + 1}`}
+                          onClick={() => setDeletingSavedLookId(null)}
+                        />
+                        <button
+                          className="saved-look-delete-button"
+                          type="button"
+                          autoFocus
+                          aria-label={`Delete saved frame ${index + 1} from ${formatTime(look.time)}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            deleteSavedLook(look.id);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Escape') setDeletingSavedLookId(null);
+                          }}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 ))}
               </div>
             ) : (
@@ -1566,7 +1640,12 @@ export function OnboardEditor() {
 
       <section className="timeline-editor" aria-label="Video editing timeline">
         <div className="timeline-toolbar">
-          <div className="timeline-title"><strong>Timeline</strong></div>
+          <div className="timeline-title">
+            <strong>Timeline</strong>
+            <span className="timeline-time" aria-label={`Current time ${formatTimecode(currentTime)}, total duration ${formatTimecode(duration)}`}>
+              {formatTimecode(currentTime)} / {formatTimecode(duration)}
+            </span>
+          </div>
           <button className="transport-button" type="button" aria-label={playing ? 'Pause video' : 'Play video'} onClick={() => void togglePlayback()} disabled={!file}>
             {playing ? <Pause size={17} /> : <Play size={17} />}
           </button>
@@ -1614,21 +1693,21 @@ export function OnboardEditor() {
               key={`${segment.startTime}-${segment.endTime}`}
               className={
                 segments.length === 1
-                  ? `timeline-segment trim-active${index === selectedSegmentIndex ? ' selected' : ''}${index === playheadSegmentIndex ? ' active' : ''}`
-                  : index === selectedSegmentIndex
-                    ? `timeline-segment selected${index === playheadSegmentIndex ? ' active' : ''}`
-                    : `timeline-segment${index === playheadSegmentIndex ? ' active' : ''}`
+                  ? `timeline-segment trim-active${index === activeTimelineSegmentIndex ? ' selected active' : ''}`
+                  : index === activeTimelineSegmentIndex
+                    ? 'timeline-segment selected active'
+                    : 'timeline-segment'
               }
               style={{
                 left: `${(segment.startTime / duration) * 100}%`,
                 width: `${((segment.endTime - segment.startTime) / duration) * 100}%`,
               }}
-              aria-current={segments.length > 1 && index === selectedSegmentIndex ? 'true' : undefined}
+              aria-current={segments.length > 1 && index === activeTimelineSegmentIndex ? 'true' : undefined}
               onClick={() => selectSegment(index)}
             >
               <span className="segment-label">{segment.playbackRate}×</span>
               <span className="visually-hidden">Kept section {index + 1} at {segment.playbackRate} times speed</span>
-              {(segments.length === 1 || index === selectedSegmentIndex) && (
+              {(segments.length === 1 || index === activeTimelineSegmentIndex) && (
                 <>
                   <button type="button" className="timeline-trim-handle start" data-edge="startTime" data-segment-index={index} aria-label={`Trim start of section ${index + 1}`} onKeyDown={onTrimHandleKeyDown}>
                     <span className="timeline-trim-visual" aria-hidden="true" />
@@ -1642,7 +1721,7 @@ export function OnboardEditor() {
           ))}
           {duration > 0 && !playheadHiddenAfterTrim && (
             <span
-              className={`timeline-playhead${playheadInSelectedSegment ? ' selected' : ''}`}
+              className="timeline-playhead"
               role="slider"
               aria-label="Timeline playhead"
               aria-valuemin={0}
@@ -1850,4 +1929,12 @@ function formatTime(seconds: number) {
   const minutes = Math.floor(safeSeconds / 60);
   const remaining = safeSeconds - minutes * 60;
   return `${String(minutes).padStart(2, '0')}:${remaining.toFixed(1).padStart(4, '0')}`;
+}
+
+function formatTimecode(seconds: number) {
+  const totalSeconds = Math.floor(Math.max(0, seconds));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainingSeconds = totalSeconds % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(remainingSeconds).padStart(2, '0')}`;
 }

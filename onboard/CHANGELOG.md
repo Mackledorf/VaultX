@@ -2,6 +2,19 @@
 
 This log records product and interface iterations so prior decisions can be understood and individual changes can be reviewed or restored without undoing unrelated work. For older milestones, exact dates were not recorded.
 
+## 2026-11-11
+
+### Added a timeline timecode
+
+- Added an `HH:MM:SS / HH:MM:SS` readout beside the Timeline heading to show the current playhead position and total source duration.
+- Rationale: let users see their position in the video while scrubbing and editing.
+
+### Added saved-frame deletion
+
+- Double-clicking a saved frame now displays a gray overlay with a trash action; deleting the frame removes it from the in-session gallery.
+- Deferred single-click look application so double-clicking to reveal the delete action does not apply the look.
+- Rationale: let users remove saved snapshots without adding persistent storage or cluttering every gallery card with another control.
+
 ## Earlier milestones (dates not recorded)
 
 ### Separated Onboard from VaultX
@@ -254,3 +267,9 @@ This log records product and interface iterations so prior decisions can be unde
 - Removed the green active-section bar at the top of the timeline.
 - Replaced the gray-only timeline track with sampled video-frame previews, cropped and rotated to match the current output while preserving their aspect ratio.
 - Rationale: make footage easier to recognize while scrubbing without distorting its frames or changing trim and excluded-range behavior.
+
+### Matched active clip controls to the playhead
+
+- Made the clip under the playhead the active editing target, with teal trim handles and its playback rate control following scrubbing and playback across cuts.
+- Added a neutral 50% dark overlay to timeline thumbnails and darkened excluded ranges further for clear separation from the playhead and trim marks.
+- Rationale: let users edit the clip they are previewing and preserve the original timeline's understated contrast and visual hierarchy.
