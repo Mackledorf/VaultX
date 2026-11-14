@@ -143,8 +143,8 @@ export function buildGifFilter(
   return segmentFilters.join(';');
 }
 
-export function buildMp4Filter(recipe: VideoEditRecipe, maxDimension?: number) {
-  return `${buildVideoSegmentFilters(recipe, 30, maxDimension).join(';')};[joined]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[out]`;
+export function buildMp4Filter(recipe: VideoEditRecipe) {
+  return `${buildVideoSegmentFilters(recipe, 30).join(';')};[joined]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[out]`;
 }
 
 export function buildPreviewTransferTable(adjustments: Record<string, number>) {

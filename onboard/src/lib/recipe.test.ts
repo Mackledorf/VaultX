@@ -88,7 +88,7 @@ test('builds a GIF filter with cuts, rotations, crop, adjustments, and palette o
   assert.match(filter, /paletteuse=dither=sierra2_4a/);
 });
 
-test('preserves frame rate while reducing GIF palette and image dimensions in fallbacks', () => {
+test('applies explicit GIF quality options without changing the frame rate', () => {
   const filter = buildGifFilter(baseRecipe, {
     frameRate: 15,
     maxDimension: 480,
@@ -159,15 +159,6 @@ test('builds an MP4 filter with edits, 30fps output, and browser-compatible dime
   assert.match(filter, /fps=30,/);
   assert.match(filter, /concat=n=2:v=1:a=0\[joined\]/);
   assert.match(filter, /unsharp=5:5:0\.440:5:5:0/);
-  assert.match(filter, /scale=trunc\(iw\/2\)\*2:trunc\(ih\/2\)\*2,setsar=1\[out\]/);
-});
-
-test('bounds MP4 fallback dimensions while retaining the output frame rate', () => {
-  const filter = buildMp4Filter(baseRecipe, 720);
-
-  assert.match(filter, /fps=30,/);
-  assert.match(filter, /scale=w='min\(iw,720\)'/);
-  assert.match(filter, /fps=30,scale=w='min\(iw,720\)'/);
   assert.match(filter, /scale=trunc\(iw\/2\)\*2:trunc\(ih\/2\)\*2,setsar=1\[out\]/);
 });
 

@@ -1,10 +1,12 @@
 import { type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
-import { ArrowDownUp, Check, ChevronDown, Copy, Crop, Download, Link2, List, Pause, Play, RefreshCw, RotateCw, Scissors, Trash2, Upload, X } from 'lucide-react';
+import { ArrowDownUp, Check, ChevronDown, CircleDot, Combine, Contrast, Copy, Crop, Download, Droplets, Focus, Link2, List, ListRestart, Menu, Moon, Palette, Pause, Play, RefreshCw, RotateCw, ScanLine, Scissors, SlidersHorizontal, Sparkles, Sun, SunDim, SunMedium, Trash2, Upload, Video as VideoIcon, Waves, X } from 'lucide-react';
 import { exportGif as exportGifLocally, exportMp4 as exportMp4Locally } from '../lib/editor';
-import { MAX_EXPORT_BYTES } from '../lib/exportSizing';
+import { DEFAULT_GIF_QUALITY, GIF_QUALITY_DESCRIPTIONS, type GifQuality } from '../lib/exportSizing';
 import { getPlaybackTransition } from '../lib/playback';
 import { buildPreviewTransferTable, getEditedDuration, isIncreaseOnlyAdjustment, isTimeInSegments, preflightExport, validateSourceDimensions } from '../lib/recipe';
 import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
+import { stitchVideos } from '../lib/stitch';
+import { isSupportedVideoFile } from '../lib/videoSource';
 import type { VideoEditRecipe } from '../types';
 
 const MIN_CROP_SIZE = 0.05;
@@ -34,6 +36,21 @@ const ADJUSTMENTS = [
   ['clarity', 'Clarity'],
   ['denoise', 'Denoise'],
 ] as const;
+type AdjustmentKey = typeof ADJUSTMENTS[number][0];
+const ADJUSTMENT_ICONS = {
+  exposure: Sun,
+  brilliance: Sparkles,
+  highlights: SunDim,
+  shadows: Moon,
+  contrast: Contrast,
+  brightness: SunMedium,
+  saturation: Droplets,
+  vibrance: Palette,
+  sharpness: Focus,
+  definition: ScanLine,
+  clarity: CircleDot,
+  denoise: Waves,
+};
 
 type CropHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 type CropRect = VideoEditRecipe['crop'];
@@ -61,23 +78,29 @@ type ExportJob = {
   width: number;
   height: number;
   format: 'gif' | 'mp4';
+  gifQuality: GifQuality;
   fileName: string;
-  status: 'queued' | 'exporting' | 'error';
+  status: 'queued' | 'exporting' | 'completed' | 'error';
   progress: number;
+  outputBytes?: number;
   error?: string;
   dismissed?: boolean;
 };
 
 export function OnboardEditor() {
   const fileInput = useRef<HTMLInputElement>(null);
+  const stitchInput = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const timelineTrackRef = useRef<HTMLDivElement>(null);
   const exportControllers = useRef(new Map<string, AbortController>());
+  const exportCompletionTimeouts = useRef(new Map<string, number>());
   const exportQueueRunning = useRef(false);
   const exportJobsRef = useRef<ExportJob[]>([]);
   const exportMenuRef = useRef<HTMLDivElement>(null);
+  const mobileActionsRef = useRef<HTMLDivElement>(null);
   const remoteImportController = useRef<AbortController | null>(null);
+  const stitchController = useRef<AbortController | null>(null);
   const dragRef = useRef<{
     handle: CropHandle;
     crop: CropRect;
@@ -114,12 +137,18 @@ export function OnboardEditor() {
   const [renameDraft, setRenameDraft] = useState('');
   const [previewUrl, setPreviewUrl] = useState('');
   const [exportFormat, setExportFormat] = useState<'gif' | 'mp4'>('gif');
+  const [gifQuality, setGifQuality] = useState<GifQuality>(DEFAULT_GIF_QUALITY);
   const [exportJobs, setExportJobs] = useState<ExportJob[]>([]);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [duration, setDuration] = useState(0);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
   const [timelineTrackSize, setTimelineTrackSize] = useState({ width: 0, height: 0 });
+  const [mobilePanel, setMobilePanel] = useState<'video' | 'adjustments' | 'crop'>('video');
+  const [mobileAdjustment, setMobileAdjustment] = useState<AdjustmentKey>('exposure');
+  const [showEditedDuration, setShowEditedDuration] = useState(false);
+  const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
+  const [mobileExportSettingsOpen, setMobileExportSettingsOpen] = useState(false);
   const [timelineFrames, setTimelineFrames] = useState<string[]>([]);
   const [sourceDimensionsValid, setSourceDimensionsValid] = useState(false);
   const [videoFrameStyle, setVideoFrameStyle] = useState<CSSProperties>({});
@@ -149,7 +178,10 @@ export function OnboardEditor() {
   const [remoteSourceHandoff] = useState(() => new URLSearchParams(window.location.hash.slice(1)).get('source'));
   const [remoteSourceUrl, setRemoteSourceUrl] = useState('');
   const [showRemoteSourceInput, setShowRemoteSourceInput] = useState(false);
+  const [isStitching, setIsStitching] = useState(false);
+  const [stitchProgress, setStitchProgress] = useState<number | null>(null);
   const editedDuration = getEditedDuration(segments);
+  const hasPendingExports = exportJobs.some((job) => job.status === 'queued' || job.status === 'exporting');
 
   useEffect(() => {
     if (!file) return;
@@ -199,6 +231,8 @@ export function OnboardEditor() {
 
   useEffect(() => () => {
     exportControllers.current.forEach((controller) => controller.abort());
+    stitchController.current?.abort();
+    exportCompletionTimeouts.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
   }, []);
 
   useEffect(() => () => remoteImportController.current?.abort(), []);
@@ -229,6 +263,24 @@ export function OnboardEditor() {
       document.removeEventListener('keydown', closeOnEscape);
     };
   }, [exportMenuOpen]);
+
+  useEffect(() => {
+    if (!mobileActionsOpen) return;
+    const closeOnOutsideClick = (event: Event) => {
+      if (event.target instanceof Node && !mobileActionsRef.current?.contains(event.target)) {
+        setMobileActionsOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setMobileActionsOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [mobileActionsOpen]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -316,6 +368,39 @@ export function OnboardEditor() {
     remoteImportController.current = null;
     setRemoteSourceProgress(null);
     loadVideo(nextFile);
+  }
+
+  function chooseVideosToStitch(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = '';
+    if (!files.length) return;
+    if (files.length < 2) {
+      setError('Select at least two videos to stitch.');
+      return;
+    }
+
+    const controller = new AbortController();
+    stitchController.current = controller;
+    setError('');
+    setIsStitching(true);
+    setStitchProgress(0);
+    void stitchVideos(files, setStitchProgress, controller.signal)
+      .then((stitchedFile) => {
+        if (controller.signal.aborted) return;
+        stitchController.current = null;
+        setStitchProgress(null);
+        loadVideo(stitchedFile);
+      })
+      .catch((stitchError: unknown) => {
+        if (!controller.signal.aborted) {
+          setError(stitchError instanceof Error ? stitchError.message : 'Could not stitch the selected videos.');
+        }
+      })
+      .finally(() => {
+        if (stitchController.current === controller) stitchController.current = null;
+        setIsStitching(false);
+        setStitchProgress(null);
+      });
   }
 
   function getEditSnapshot(): EditorSnapshot {
@@ -453,8 +538,8 @@ export function OnboardEditor() {
     setSourceDimensionsValid(false);
     setActiveSavedLookId(null);
     if (!nextFile) return;
-    if (!nextFile.name.toLowerCase().endsWith('.mp4') && nextFile.type !== 'video/mp4') {
-      setError('Choose an MP4 video.');
+    if (!isSupportedVideoFile(nextFile)) {
+      setError('Choose an MP4 or MOV video. HEVC playback depends on browser codec support.');
       return;
     }
     initialFrameReadyRef.current = false;
@@ -470,6 +555,10 @@ export function OnboardEditor() {
   }
 
   function importRemoteSource(value: string) {
+    if (isStitching) {
+      setError('Wait for the current stitching operation to finish before loading another source.');
+      return;
+    }
     let sourceUrl: URL;
     try {
       sourceUrl = parseRemoteMp4Url(value.trim());
@@ -502,7 +591,7 @@ export function OnboardEditor() {
         if (remoteImportController.current !== controller || (sourceError instanceof DOMException && sourceError.name === 'AbortError')) return;
         remoteImportController.current = null;
         setRemoteSourceProgress(null);
-        setError(`${sourceError instanceof Error ? sourceError.message : 'Could not load this video.'} Use Choose MP4 or drop a file instead.`);
+        setError(`${sourceError instanceof Error ? sourceError.message : 'Could not load this video.'} Use Choose video or drop a file instead.`);
       });
   }
 
@@ -579,6 +668,10 @@ export function OnboardEditor() {
   function dropVideo(event: ReactDragEvent<HTMLDivElement>) {
     event.preventDefault();
     setIsDraggingFile(false);
+    if (isStitching) {
+      setError('Wait for the current stitching operation to finish before loading another source.');
+      return;
+    }
     remoteImportController.current?.abort();
     remoteImportController.current = null;
     setRemoteSourceProgress(null);
@@ -588,7 +681,7 @@ export function OnboardEditor() {
   function onMetadata() {
     const video = videoRef.current;
     if (!video || !Number.isFinite(video.duration) || video.duration <= 0) {
-      setError('Could not read this video’s duration. Try another MP4.');
+      setError('Could not read this video’s duration. It may use a codec this browser cannot preview.');
       return;
     }
     setDuration(video.duration);
@@ -603,6 +696,10 @@ export function OnboardEditor() {
       setSourceDimensionsValid(false);
       setError(dimensionError instanceof Error ? dimensionError.message : 'Video dimensions are not supported.');
     }
+  }
+
+  function onVideoLoadError() {
+    setError('The browser could not load or decode this video. HEVC/H.265 support varies by browser and device; try an H.264-encoded MP4.');
   }
 
   function onVideoDataReady() {
@@ -1184,6 +1281,11 @@ export function OnboardEditor() {
   }
 
   function dismissExportJob(jobId: string) {
+    const job = exportJobsRef.current.find((item) => item.id === jobId);
+    if (job?.status === 'completed' || job?.status === 'error') {
+      removeExportJob(jobId);
+      return;
+    }
     updateExportJobs((current) => current.flatMap((job) => {
       if (job.id !== jobId) return [job];
       return job.status === 'error' ? [] : [{ ...job, dismissed: true }];
@@ -1191,6 +1293,11 @@ export function OnboardEditor() {
   }
 
   function removeExportJob(jobId: string) {
+    const timeoutId = exportCompletionTimeouts.current.get(jobId);
+    if (timeoutId !== undefined) {
+      window.clearTimeout(timeoutId);
+      exportCompletionTimeouts.current.delete(jobId);
+    }
     updateExportJobs((current) => current.filter((job) => job.id !== jobId));
   }
 
@@ -1224,6 +1331,7 @@ export function OnboardEditor() {
                 item.id === job.id ? { ...item, progress } : item
               ))),
               controller.signal,
+              job.gifQuality,
             )
             : await exportMp4Locally(
               job.file,
@@ -1238,7 +1346,17 @@ export function OnboardEditor() {
             );
           if (!controller.signal.aborted) {
             downloadExport(output, job.fileName);
-            removeExportJob(job.id);
+            updateExportJobs((current) => current.flatMap((item) => (
+              item.id === job.id
+                ? item.dismissed
+                  ? []
+                  : [{ ...item, status: 'completed', progress: 100, outputBytes: output.size }]
+                : [item]
+            )));
+            if (exportJobsRef.current.some((item) => item.id === job.id)) {
+              const timeoutId = window.setTimeout(() => removeExportJob(job.id), 5000);
+              exportCompletionTimeouts.current.set(job.id, timeoutId);
+            }
           }
         } catch (exportError) {
           updateExportJobs((current) => current.flatMap((item) => {
@@ -1285,6 +1403,7 @@ export function OnboardEditor() {
       width: dimensions.width,
       height: dimensions.height,
       format,
+      gifQuality,
       fileName: `${baseName}.${format}`,
       status: 'queued',
       progress: 0,
@@ -1442,11 +1561,17 @@ export function OnboardEditor() {
       />
     );
   }
+  const [selectedAdjustmentKey, selectedAdjustmentLabel] = ADJUSTMENTS.find(([key]) => key === mobileAdjustment) ?? ADJUSTMENTS[0];
+  const adjustmentMinimum = isIncreaseOnlyAdjustment(selectedAdjustmentKey) ? 0 : -100;
+  const adjustmentTickValues = Array.from(
+    { length: Math.floor((100 - adjustmentMinimum) / 10) + 1 },
+    (_, index) => adjustmentMinimum + index * 10,
+  );
   return (
     <main className="editor-app">
       <header className="onboard-header">
         <div className="brand-lockup"><span>ONBOARD</span></div>
-        <div className="project-title">
+        <div className={`project-title${file ? '' : ' empty-project-title'}`}>
           {isRenaming && file ? (
             <>
               <input
@@ -1479,14 +1604,15 @@ export function OnboardEditor() {
               className="export-button"
               type="button"
               onClick={startExport}
-              disabled={!file || !duration || !sourceDimensionsValid || !segments.length}
+              disabled={!file || !duration || !sourceDimensionsValid || !segments.length || isStitching}
             >
               <Download size={15} /> Export {exportFormat.toUpperCase()}
+              {exportFormat === 'gif' && <span className="export-quality-label"> · {gifQuality[0].toUpperCase()}{gifQuality.slice(1)}</span>}
             </button>
             <button
               className="export-dropdown-toggle"
               type="button"
-              aria-label="Choose export format"
+              aria-label="Choose export settings"
               aria-haspopup="menu"
               aria-expanded={exportMenuOpen}
               onClick={() => setExportMenuOpen((open) => !open)}
@@ -1494,7 +1620,7 @@ export function OnboardEditor() {
               <ChevronDown size={15} />
             </button>
             {exportMenuOpen && (
-              <div className="export-format-menu" role="menu" aria-label="Export format">
+              <div className="export-format-menu" role="menu" aria-label="Export settings">
                 {(['gif', 'mp4'] as const).map((format) => (
                   <button
                     className="export-format-option"
@@ -1505,16 +1631,77 @@ export function OnboardEditor() {
                     onClick={() => chooseExportFormat(format)}
                   >
                     {format === exportFormat && <Check size={14} />}
-                    <span>Export as {format.toUpperCase()} · up to {Math.round(MAX_EXPORT_BYTES[format] / 1_000_000)} MB</span>
+                    <span>Export as {format.toUpperCase()}</span>
                   </button>
                 ))}
+                {exportFormat === 'gif' && (
+                  <>
+                    <div className="export-menu-divider" role="separator" />
+                    <div className="export-menu-heading">GIF quality</div>
+                    {(['low', 'medium', 'high'] as const).map((quality) => (
+                      <button
+                        className="export-format-option export-quality-option"
+                        key={quality}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={gifQuality === quality}
+                        onClick={() => {
+                          setGifQuality(quality);
+                          setExportMenuOpen(false);
+                        }}
+                      >
+                        {gifQuality === quality && <Check size={14} />}
+                        <span className="export-quality-copy">
+                          <strong>{quality[0].toUpperCase()}{quality.slice(1)}</strong>
+                          <small>{GIF_QUALITY_DESCRIPTIONS[quality]}</small>
+                        </span>
+                      </button>
+                    ))}
+                    <p className="export-menu-note">Size varies with image detail and motion.</p>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+          <div className="mobile-actions" ref={mobileActionsRef}>
+            <button
+              className="mobile-actions-toggle"
+              type="button"
+              aria-label="Editor actions"
+              aria-expanded={mobileActionsOpen}
+              onClick={() => setMobileActionsOpen((open) => !open)}
+            >
+              <Menu size={19} aria-hidden="true" />
+            </button>
+            {mobileActionsOpen && (
+              <div className="mobile-action-menu" role="group" aria-label="Editor actions">
+                <button type="button" onClick={() => {
+                  setMobileActionsOpen(false);
+                  setMobileExportSettingsOpen(true);
+                }}>
+                  <Download size={16} aria-hidden="true" /> Export
+                </button>
+                <button type="button" disabled={isStitching} onClick={() => {
+                  setMobileActionsOpen(false);
+                  setMobilePanel('video');
+                  fileInput.current?.click();
+                }}>
+                  <Upload size={16} aria-hidden="true" /> Source
+                </button>
+                <button type="button" disabled={isStitching || hasPendingExports} onClick={() => {
+                  setMobileActionsOpen(false);
+                  setMobilePanel('video');
+                  stitchInput.current?.click();
+                }}>
+                  <Combine size={16} aria-hidden="true" /> Stitch
+                </button>
               </div>
             )}
           </div>
           {exportJobs.some((job) => !job.dismissed) && (
             <section className="export-queue" aria-label="Export queue" aria-live="polite">
               {exportJobs.filter((job) => !job.dismissed).map((job) => (
-                <article className={`export-queue-item${job.status === 'error' ? ' error' : ''}`} key={job.id}>
+                <article className={`export-queue-item${job.status === 'error' ? ' error' : job.status === 'completed' ? ' completed' : ''}`} key={job.id}>
                   <div className="export-queue-heading">
                     <div className="export-queue-copy">
                       <strong>{job.fileName}</strong>
@@ -1522,8 +1709,10 @@ export function OnboardEditor() {
                         {job.status === 'queued'
                           ? `Queued · ${job.format.toUpperCase()}`
                           : job.status === 'exporting'
-                            ? `Exporting ${job.format.toUpperCase()} · ${job.progress}%`
-                            : job.error}
+                            ? `Exporting ${job.format.toUpperCase()}${job.format === 'gif' ? ` · ${job.gifQuality[0].toUpperCase()}${job.gifQuality.slice(1)}` : ''} · ${job.progress}%`
+                            : job.status === 'completed'
+                              ? `Downloaded · ${formatByteCount(job.outputBytes ?? 0)} (${(job.outputBytes ?? 0).toLocaleString()} bytes)`
+                              : job.error}
                       </span>
                     </div>
                     <button
@@ -1550,12 +1739,71 @@ export function OnboardEditor() {
         </div>
       </header>
 
-      <section className="editor-main" aria-label="Video editor">
-        <aside className="tool-panel transform-panel" aria-label="Video editing controls">
+      {mobileExportSettingsOpen && (
+        <div className="mobile-export-backdrop" onClick={(event) => {
+          if (event.target === event.currentTarget) setMobileExportSettingsOpen(false);
+        }}>
+          <section className="mobile-export-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-export-title">
+            <div className="mobile-export-heading">
+              <h2 id="mobile-export-title">Export</h2>
+              <button type="button" aria-label="Close export settings" onClick={() => setMobileExportSettingsOpen(false)}>
+                <X size={18} />
+              </button>
+            </div>
+            <div className="mobile-export-options" role="group" aria-label="Output format">
+              {(['gif', 'mp4'] as const).map((format) => (
+                <button
+                  type="button"
+                  aria-pressed={exportFormat === format}
+                  className={exportFormat === format ? 'active' : ''}
+                  key={format}
+                  onClick={() => chooseExportFormat(format)}
+                >
+                  {format.toUpperCase()}
+                </button>
+              ))}
+            </div>
+            {exportFormat === 'gif' && (
+              <div className="mobile-export-quality" role="group" aria-label="GIF quality">
+                {(['low', 'medium', 'high'] as const).map((quality) => (
+                  <button
+                    type="button"
+                    aria-pressed={gifQuality === quality}
+                    className={gifQuality === quality ? 'active' : ''}
+                    key={quality}
+                    onClick={() => setGifQuality(quality)}
+                  >
+                    <strong>{quality[0].toUpperCase()}{quality.slice(1)}</strong>
+                    <small>{GIF_QUALITY_DESCRIPTIONS[quality]}</small>
+                  </button>
+                ))}
+              </div>
+            )}
+            <button
+              className="mobile-export-confirm"
+              type="button"
+              disabled={!file || !duration || !sourceDimensionsValid || !segments.length || isStitching}
+              onClick={() => {
+                startExport();
+                setMobileExportSettingsOpen(false);
+              }}
+            >
+              Export {exportFormat.toUpperCase()}
+            </button>
+          </section>
+        </div>
+      )}
+
+      <section className="editor-main" aria-label="Video editor" data-mobile-panel={mobilePanel}>
+        <input ref={fileInput} className="visually-hidden" type="file" accept="video/mp4,.mp4,video/quicktime,.mov" onChange={chooseVideo} />
+        <input ref={stitchInput} className="visually-hidden" type="file" accept="video/mp4,.mp4,video/quicktime,.mov" multiple onChange={chooseVideosToStitch} />
+        <aside id="mobile-panel-tools" className="tool-panel transform-panel" aria-label="Video editing controls">
           <section className="tool-section rotation-section">
             <h2>Rotation</h2>
             <div className="transform-actions">
-              <button className="tool-button" type="button" disabled={!file} onClick={rotateVideo}><RotateCw size={15} /> Rotate 90°</button>
+              <button className="tool-button" type="button" aria-label="Rotate 90°" disabled={!file} onClick={rotateVideo}>
+                <RotateCw size={15} /> <span className="rotation-label">Rotate 90°</span>
+              </button>
             </div>
           </section>
 
@@ -1578,8 +1826,9 @@ export function OnboardEditor() {
             </div>
             <div className="crop-actions">
               <button
-                className="tool-button"
+                className="tool-button crop-reset-button"
                 type="button"
+                aria-label="Reset crop"
                 disabled={!file || (crop.x === 0 && crop.y === 0 && crop.width === 1 && crop.height === 1 && cropAspectRatio === null)}
                 onClick={() => {
                   recordEdit();
@@ -1587,7 +1836,9 @@ export function OnboardEditor() {
                   setCropAspectRatio(null);
                 }}
               >
-                <Crop size={15} /> Reset crop
+                <Crop className="desktop-crop-reset-icon" size={15} />
+                <ListRestart className="mobile-crop-reset-icon" size={15} />
+                <span>Reset crop</span>
               </button>
               <button
                 className="tool-button crop-invert-button"
@@ -1642,22 +1893,53 @@ export function OnboardEditor() {
           <section className="tool-section source-section">
             <h2>Source</h2>
             <div className="source-actions">
-              <button className="tool-button" type="button" onClick={() => fileInput.current?.click()}>
+              <button
+                className="source-icon-button"
+                type="button"
+                aria-label={file ? 'Replace source video' : 'Choose source video'}
+                title={file ? 'Replace source video' : 'Choose source video'}
+                disabled={isStitching}
+                onClick={() => fileInput.current?.click()}
+              >
                 <Upload size={15} />
-                {file ? 'Replace media' : 'Choose MP4'}
               </button>
               <button
-                className="source-url-toggle"
+                className="source-icon-button source-url-toggle"
                 type="button"
                 aria-label="Load video from URL"
+                disabled={isStitching}
                 aria-expanded={showRemoteSourceInput}
                 title="Load video from URL"
                 onClick={() => setShowRemoteSourceInput((visible) => !visible)}
               >
                 <Link2 size={16} />
               </button>
+              <button
+                className="source-icon-button"
+                type="button"
+                aria-label="Stitch multiple videos"
+                title={isStitching ? 'Stitching videos' : hasPendingExports ? 'Wait for queued exports to finish before stitching' : 'Stitch videos and replace the current source'}
+                disabled={isStitching || hasPendingExports}
+                onClick={() => stitchInput.current?.click()}
+              >
+                <Combine size={16} />
+              </button>
             </div>
-            <input ref={fileInput} className="visually-hidden" type="file" accept="video/mp4,.mp4" onChange={chooseVideo} />
+            {isStitching && (
+              <div className="stitch-progress" role="status" aria-live="polite">
+                <span>Stitching videos · {stitchProgress ?? 0}%</span>
+                <div
+                  className="remote-import-progress"
+                  role="progressbar"
+                  aria-label="Stitching video sources"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={stitchProgress ?? 0}
+                >
+                  <span style={{ width: `${stitchProgress ?? 0}%` }} />
+                </div>
+              </div>
+            )}
             {showRemoteSourceInput && (
               <form
                 className="source-url-form"
@@ -1760,8 +2042,11 @@ export function OnboardEditor() {
                   </>
                 ) : (
                   <>
-                    <strong>Drop an MP4 to begin</strong>
+                    <strong className="desktop-dropzone-label">Drop an MP4 or MOV to begin</strong>
                     <span>or <button type="button" onClick={() => fileInput.current?.click()}>browse files</button></span>
+                    <span className="mobile-dropzone-label">
+                      <button type="button" onClick={() => fileInput.current?.click()}>browse files</button> to begin
+                    </span>
                   </>
                 )}
               </div>
@@ -1779,6 +2064,7 @@ export function OnboardEditor() {
                   onClick={() => setCropOverlayVisible((visible) => !visible)}
                   onLoadedMetadata={onMetadata}
                   onLoadedData={onVideoDataReady}
+                  onError={onVideoLoadError}
                   onTimeUpdate={onTimeUpdate}
                   onPlay={() => setPlaying(true)}
                   onPause={onVideoPause}
@@ -1815,10 +2101,57 @@ export function OnboardEditor() {
               </div>
             )}
           </div>
+          {isStitching && (
+            <div className="mobile-stitch-status" role="status" aria-live="polite">
+              <span>Stitching videos · {stitchProgress ?? 0}%</span>
+              <div className="progress-track" role="progressbar" aria-label="Stitching video sources" aria-valuemin={0} aria-valuemax={100} aria-valuenow={stitchProgress ?? 0}>
+                <span style={{ width: `${stitchProgress ?? 0}%` }} />
+              </div>
+            </div>
+          )}
           {error && <p className="inline-error" role="alert">{error}</p>}
         </section>
 
-        <aside className="tool-panel adjustments-panel" aria-label="Adjustments">
+        <aside id="mobile-panel-adjustments" className="tool-panel adjustments-panel" aria-label="Adjustments">
+          <div className="mobile-adjustment-editor">
+            <div className="mobile-adjustment-strip" role="group" aria-label="Choose image adjustment">
+              {ADJUSTMENTS.map(([key, label]) => {
+                const AdjustmentIcon = ADJUSTMENT_ICONS[key];
+                return (
+                  <button
+                    className={`mobile-adjustment-choice${mobileAdjustment === key ? ' active' : ''}`}
+                    type="button"
+                    aria-label={label}
+                    aria-pressed={mobileAdjustment === key}
+                    key={key}
+                    style={{
+                      '--adjustment-ring': adjustments[key] < 0
+                        ? `conic-gradient(transparent ${100 + adjustments[key]}%, var(--accent) 0)`
+                        : `conic-gradient(var(--accent) ${adjustments[key]}%, transparent 0)`,
+                    } as CSSProperties}
+                    onClick={() => setMobileAdjustment(key)}
+                  >
+                    <span className="mobile-adjustment-ring">
+                      <AdjustmentIcon size={17} aria-hidden="true" />
+                    </span>
+                    <span className="mobile-adjustment-label">{label}</span>
+                  </button>
+                );
+              })}
+            </div>
+            <label className="mobile-adjustment-slider">
+              {adjustmentSlider(selectedAdjustmentKey, selectedAdjustmentLabel)}
+              <span className="mobile-adjustment-ticks" aria-hidden="true">
+                {adjustmentTickValues.map((value) => (
+                  <span
+                    className={value === adjustmentMinimum || value === 0 || value === 100 ? 'major' : ''}
+                    key={value}
+                    style={{ left: `${((value - adjustmentMinimum) / (100 - adjustmentMinimum)) * 100}%` }}
+                  />
+                ))}
+              </span>
+            </label>
+          </div>
           <section className="tool-section adjustment-section">
             <div className="adjustment-heading">
               <h2>Adjustments</h2>
@@ -1920,23 +2253,40 @@ export function OnboardEditor() {
           </section>
         </aside>
 
-      <section className="timeline-editor" aria-label="Video editing timeline">
+      <section id="mobile-panel-timeline" className="timeline-editor" aria-label="Video editing timeline">
         <div className="timeline-toolbar">
           <div className="timeline-title">
             <strong>Timeline</strong>
-            <span className="timeline-time" aria-label={`Current time ${formatTimecode(currentTime)}, source duration ${formatTimecode(duration)}`}>
+            <span className="timeline-time desktop-timeline-time" aria-label={`Current time ${formatTimecode(currentTime)}, source duration ${formatTimecode(duration)}`}>
               {formatTimecode(currentTime)} / {formatTimecode(duration)}
             </span>
             <span className="timeline-total" aria-label={`Edited output duration ${formatTimecode(editedDuration)}`}>
               {formatTimecode(editedDuration)} total
             </span>
+            <button
+              className="mobile-timeline-time"
+              type="button"
+              aria-label={showEditedDuration ? 'Show current time and source duration' : 'Show edited output duration'}
+              title={showEditedDuration ? 'Show current time and source duration' : 'Show edited output duration'}
+              onClick={() => setShowEditedDuration((visible) => !visible)}
+            >
+              {showEditedDuration
+                ? `${formatTimecode(editedDuration)} total`
+                : `${formatTimecode(currentTime)} / ${formatTimecode(duration)}`}
+            </button>
           </div>
           <button className="transport-button" type="button" aria-label={playing ? 'Pause video' : 'Play video'} onClick={() => void togglePlayback()} disabled={!file}>
             {playing ? <Pause size={17} /> : <Play size={17} />}
           </button>
           <div className="timeline-tools">
-            <button className="timeline-tool" type="button" disabled={!canCutAtTime(currentTime)} onClick={() => cutAtTime(currentTime)}>Cut</button>
-            <button className="timeline-tool" type="button" onClick={removeSelectedSegment} disabled={segments.length <= 1 || !selectedSegment()}>Remove section</button>
+            <button className="timeline-tool" type="button" aria-label="Cut" title="Cut" disabled={!canCutAtTime(currentTime)} onClick={() => cutAtTime(currentTime)}>
+              <Scissors className="timeline-action-icon" size={16} aria-hidden="true" />
+              <span className="timeline-action-label">Cut</span>
+            </button>
+            <button className="timeline-tool" type="button" aria-label="Remove section" title="Remove section" onClick={removeSelectedSegment} disabled={segments.length <= 1 || !selectedSegment()}>
+              <Trash2 className="timeline-action-icon" size={16} aria-hidden="true" />
+              <span className="timeline-action-label">Remove section</span>
+            </button>
           </div>
         </div>
         <div className="timeline-ruler" aria-hidden="true">
@@ -2056,6 +2406,38 @@ export function OnboardEditor() {
         </div>
       </section>
       </section>
+      <nav className="mobile-panel-nav" aria-label="Editor panels">
+        <button
+          className={`mobile-panel-button${mobilePanel === 'video' ? ' active' : ''}`}
+          type="button"
+          aria-pressed={mobilePanel === 'video'}
+          aria-controls="mobile-panel-timeline"
+          onClick={() => setMobilePanel('video')}
+        >
+          <VideoIcon size={17} aria-hidden="true" />
+          <span>Video</span>
+        </button>
+        <button
+          className={`mobile-panel-button adjustments-tab${mobilePanel === 'adjustments' ? ' active' : ''}`}
+          type="button"
+          aria-pressed={mobilePanel === 'adjustments'}
+          aria-controls="mobile-panel-adjustments"
+          onClick={() => setMobilePanel('adjustments')}
+        >
+          <SlidersHorizontal size={17} aria-hidden="true" />
+          <span>Adjust</span>
+        </button>
+        <button
+          className={`mobile-panel-button${mobilePanel === 'crop' ? ' active' : ''}`}
+          type="button"
+          aria-pressed={mobilePanel === 'crop'}
+          aria-controls="mobile-panel-tools"
+          onClick={() => setMobilePanel('crop')}
+        >
+          <Crop size={17} aria-hidden="true" />
+          <span>Crop</span>
+        </button>
+      </nav>
     </main>
   );
 }

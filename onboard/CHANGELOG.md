@@ -2,7 +2,57 @@
 
 This log records product and interface iterations so prior decisions can be understood and individual changes can be reviewed or restored without undoing unrelated work. For older milestones, exact dates were not recorded.
 
+## 2026-11-14
+
+### Tightened mobile editing controls and panel spacing
+
+- Hid mobile timeline ruler labels while retaining the timeline tick marks. Replaced the adjustment abbreviations with icons, added a thin gray button outline and value ticks, and removed the redundant adjustment name above the slider.
+- Switched the mobile crop reset action to the List Restart icon and placed playback speed above the crop controls. Shortened the mobile tab label to Adjust and the empty-canvas prompt to “browse files to begin.”
+- Rebalanced mobile panel height and spacing to fit the controls with consistent desktop-derived padding.
+- Rationale: reduce redundant mobile UI while keeping the editing controls recognizable and balanced.
+
+### Aligned mobile styling with the desktop editor
+
+- Restored a full-width navigation panel, desktop-style controls and sliders, playback and timeline ticks, and consistent spacing. Centered the title and mobile timeline counter independently of the surrounding buttons.
+- Placed rotation, crop presets, reset, and inversion in one row above playback speed. Adjustment circles now show only a teal amount stroke, without a gray ring or numeric value.
+- Updated the export sheet to use Onboard's existing control shapes, colors, type scale, and hover states.
+- Rationale: preserve the compact mobile workflow while retaining the established Onboard design system.
+
+### Refined the mobile editor around video, adjustments, and crop
+
+- Reworked mobile navigation to a compact centered Video/Adjustments/Crop bar and kept the video preview dominant over equally sized compact panels.
+- Simplified the mobile timeline to thumbnail frames, play/pause, a tap-to-toggle duration counter, and icon-only cut/remove actions. Added a horizontally scrolling adjustment chooser with amount rings and one slider, and combined rotation/crop controls above playback speed.
+- Replaced the mobile export control with an Export/Source/Stitch action menu. Export opens output format and GIF quality settings; Source and Stitch launch local file pickers.
+- Rationale: follow familiar phone photo/video editing patterns while preserving Onboard's visual design system and leaving desktop behavior unchanged.
+
+## 2026-11-13
+
+### Added a mobile-focused editor layout
+
+- Replaced the long stacked phone layout with a persistent preview and bottom tabs for Tools, Timeline, and Adjustments, all within the existing editor page.
+- Made the selected panel independently scrollable, sized navigation for touch, and reflowed the timeline toolbar to prevent horizontal overflow. The desktop panel layout remains unchanged.
+- Rationale: make the editor usable on phones while preserving the familiar desktop workspace and keeping all editing controls reachable.
+
+### Added local video stitching
+
+- Replaced the Source panel's text upload control with three accessible icon buttons for choosing/replacing a video, loading a URL, and stitching videos.
+- Added multiple-file selection for MP4/MOV and locally concatenates clips in selection order into a temporary MP4 that replaces the current source. Clips are normalized to a shared frame size while preserving aspect ratio, and inline progress plus decoder/encoder errors remain visible in the editor.
+- Rationale: let users assemble a sequence without uploading media or introducing a separate editing page, while reusing the existing single-source timeline and export workflow.
+
+### Accepted local MOV and HEVC video sources
+
+- Expanded the local video picker and drag-and-drop validation to accept MP4 and MOV files, including iPhone QuickTime videos identified by `video/quicktime`.
+- Keep MOV inputs identified as MOV files when passing them to FFmpeg, and explain that HEVC/H.265 preview and export support depends on browser and bundled decoder codec support.
+- Rationale: iPhone videos are commonly HEVC-encoded MOV/MP4 files; HEIC/HEIF remains a still-image format and is not accepted as a video source.
+
 ## 2026-11-11
+
+### Replaced output caps with selectable GIF quality
+
+- Removed the 5 MB GIF and 20 MB MP4 ceilings and their size-targeted retry profiles, which could repeatedly lower GIF palette colors and dimensions before ultimately failing.
+- Added Low, Medium, and High GIF quality choices, with Medium selected by default. Every preset retains 15 fps; Low and Medium use smaller dimensions and palettes, while High keeps source resolution and up to 256 colors.
+- Show the actual output size in the completion notification and explain that GIF size varies with frame count, dimensions, and image changes rather than MP4 input size.
+- Rationale: let users choose a deliberate quality trade-off instead of failing exports against arbitrary caps; leave actual browser and device resource constraints to explicit export diagnostics.
 
 ### Preserved GIF frame rate in size fallbacks
 
