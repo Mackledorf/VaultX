@@ -4,31 +4,20 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "concurrently \"npm:dev:api\" \"npm:dev:web\"",
-    "dev:api": "node --watch server/index.js",
-    "dev:web": "vite --host 127.0.0.1",
+    "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
-    "test": "node --test server/*.test.js",
-    "preview": "vite preview",
-    "start": "node server/index.js",
-    "hash-password": "node server/scripts/hash-password.js"
+    "test": "node --experimental-strip-types --test tests/*.test.js",
+    "preview": "vite preview"
   },
   "dependencies": {
-    "better-sqlite3": "^13.0.3",
-    "cookie-parser": "^1.4.6",
-    "dotenv": "^16.4.7",
-    "express": "^4.21.2",
     "lucide-react": "^0.468.0",
-    "multer": "^2.1.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "sharp": "^0.35.5"
+    "react-dom": "^18.3.1"
   },
   "devDependencies": {
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^6.0.1",
-    "concurrently": "^9.1.0",
     "typescript": "^5.5.3",
     "vite": "^8.0.10"
   }
