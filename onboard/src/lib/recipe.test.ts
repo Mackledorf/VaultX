@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildGifFilter, buildMp4Filter, buildPreviewTransferTable, getEditedDuration, isTimeInSegments, normalizeEditRecipe, preflightExport, validateSourceDimensions } from './recipe';
+import { buildGifFilter, buildMp4Filter, buildPreviewFilterId, buildPreviewTransferTable, getEditedDuration, isTimeInSegments, normalizeEditRecipe, preflightExport, validateSourceDimensions } from './recipe';
+import { getGifEncodingProfile } from './exportSizing';
 import type { VideoEditRecipe } from '../types';
 
 const baseRecipe: VideoEditRecipe = {
@@ -102,6 +103,17 @@ test('applies explicit GIF quality options without changing the frame rate', () 
   assert.match(filter, /paletteuse=dither=bayer:bayer_scale=3/);
 });
 
+test('uses independently selected GIF frame rate, resolution, and palette settings in the output filter', () => {
+  const filter = buildGifFilter(baseRecipe, getGifEncodingProfile({
+    frameRate: 'high',
+    resolution: 'low',
+    colors: 'low',
+  }));
+
+  assert.match(filter, /fps=25,scale=w='min\(iw,720\)'/);
+  assert.match(filter, /palettegen=stats_mode=diff:max_colors=64/);
+});
+
 test('samples output frames before frame-local adjustments but keeps temporal denoise before sampling', () => {
   const defaultFilter = buildGifFilter(baseRecipe);
   assert.ok(defaultFilter.indexOf('fps=15') < defaultFilter.indexOf('lutrgb='));
@@ -141,6 +153,14 @@ test('uses the same tonal transfer for the preview and encoded video', () => {
   assert.notDeepEqual(transfer, identity);
   assert.match(filter, /lutrgb=r='/);
   assert.match(filter, /pow\(/);
+});
+
+test('changes the preview filter reference whenever an adjustment changes', () => {
+  const initialId = buildPreviewFilterId(baseRecipe.adjustments);
+  const changedId = buildPreviewFilterId({ ...baseRecipe.adjustments, exposure: 10 });
+
+  assert.equal(buildPreviewFilterId(baseRecipe.adjustments), initialId);
+  assert.notEqual(changedId, initialId);
 });
 
 test('builds an MP4 filter with edits, 30fps output, and browser-compatible dimensions', () => {

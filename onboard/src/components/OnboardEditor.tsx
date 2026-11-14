@@ -1,9 +1,15 @@
 import { type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
-import { ArrowDownUp, Check, ChevronDown, CircleDot, Combine, Contrast, Copy, Crop, Download, Droplets, Focus, Link2, List, ListRestart, Menu, Moon, Palette, Pause, Play, RefreshCw, RotateCw, ScanLine, Scissors, SlidersHorizontal, Sparkles, Sun, SunDim, SunMedium, Trash2, Upload, Video as VideoIcon, Waves, X } from 'lucide-react';
+import { ArrowDownUp, ChevronDown, CircleDot, Combine, Contrast, Copy, Crop, Download, Droplets, Focus, Link2, List, ListRestart, Menu, Moon, Palette, Pause, Play, RefreshCw, RotateCw, ScanLine, Scissors, SlidersHorizontal, Sparkles, Sun, SunDim, SunMedium, Trash2, Upload, Video as VideoIcon, Waves, X } from 'lucide-react';
 import { exportGif as exportGifLocally, exportMp4 as exportMp4Locally } from '../lib/editor';
-import { DEFAULT_GIF_QUALITY, GIF_QUALITY_DESCRIPTIONS, type GifQuality } from '../lib/exportSizing';
+import {
+  DEFAULT_GIF_EXPORT_SETTINGS,
+  GIF_EXPORT_SETTING_LEVELS,
+  GIF_EXPORT_SETTING_VALUES,
+  getGifEncodingProfile,
+  type GifExportSettings,
+} from '../lib/exportSizing';
 import { getPlaybackTransition } from '../lib/playback';
-import { buildPreviewTransferTable, getEditedDuration, isIncreaseOnlyAdjustment, isTimeInSegments, preflightExport, validateSourceDimensions } from '../lib/recipe';
+import { buildPreviewFilterId, buildPreviewTransferTable, getEditedDuration, isIncreaseOnlyAdjustment, isTimeInSegments, preflightExport, validateSourceDimensions } from '../lib/recipe';
 import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
 import { stitchVideos } from '../lib/stitch';
 import { isSupportedVideoFile } from '../lib/videoSource';
@@ -78,7 +84,7 @@ type ExportJob = {
   width: number;
   height: number;
   format: 'gif' | 'mp4';
-  gifQuality: GifQuality;
+  gifSettings: GifExportSettings;
   fileName: string;
   status: 'queued' | 'exporting' | 'completed' | 'error';
   progress: number;
@@ -137,7 +143,7 @@ export function OnboardEditor() {
   const [renameDraft, setRenameDraft] = useState('');
   const [previewUrl, setPreviewUrl] = useState('');
   const [exportFormat, setExportFormat] = useState<'gif' | 'mp4'>('gif');
-  const [gifQuality, setGifQuality] = useState<GifQuality>(DEFAULT_GIF_QUALITY);
+  const [gifSettings, setGifSettings] = useState<GifExportSettings>(DEFAULT_GIF_EXPORT_SETTINGS);
   const [exportJobs, setExportJobs] = useState<ExportJob[]>([]);
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
   const [isDraggingFile, setIsDraggingFile] = useState(false);
@@ -617,14 +623,6 @@ export function OnboardEditor() {
     setMediaName(`${baseName}.${exportFormat}`);
     setHasRenamedMedia(true);
     setIsRenaming(false);
-  }
-
-  function chooseExportFormat(format: 'gif' | 'mp4') {
-    setExportFormat(format);
-    if (hasRenamedMedia) {
-      setMediaName((current) => `${current.replace(/\.[^.]+$/, '')}.${format}`);
-    }
-    setExportMenuOpen(false);
   }
 
   function cropForAspectRatio(aspectRatio: number, nextRotation = rotation): CropRect {
@@ -1331,7 +1329,7 @@ export function OnboardEditor() {
                 item.id === job.id ? { ...item, progress } : item
               ))),
               controller.signal,
-              job.gifQuality,
+              job.gifSettings,
             )
             : await exportMp4Locally(
               job.file,
@@ -1379,9 +1377,8 @@ export function OnboardEditor() {
     }
   }
 
-  function startExport() {
+  function startExport(format: 'gif' | 'mp4') {
     if (!file || !segments.length || !sourceDimensionsValid) return;
-    const format = exportFormat;
     const recipe = {
       segments: segments.map((segment) => ({ ...segment })),
       rotation,
@@ -1394,6 +1391,10 @@ export function OnboardEditor() {
       setError(preflightError instanceof Error ? preflightError.message : 'Export settings are invalid.');
       return;
     }
+    setExportFormat(format);
+    if (hasRenamedMedia) {
+      setMediaName((current) => `${current.replace(/\.[^.]+$/, '')}.${format}`);
+    }
     const baseName = mediaName.replace(/\.[^.]+$/, '') || 'onboard';
     const job: ExportJob = {
       id: crypto.randomUUID(),
@@ -1403,7 +1404,7 @@ export function OnboardEditor() {
       width: dimensions.width,
       height: dimensions.height,
       format,
-      gifQuality,
+      gifSettings: { ...gifSettings },
       fileName: `${baseName}.${format}`,
       status: 'queued',
       progress: 0,
@@ -1480,6 +1481,7 @@ export function OnboardEditor() {
   const previewSaturation = Math.max(0, 1 + (adjustments.saturation + adjustments.vibrance * 0.6) / 100);
   const previewSharpness = Math.min(2, (adjustments.sharpness + adjustments.definition * 0.7) / 100);
   const previewClarity = adjustments.clarity / 100;
+  const previewFilterId = buildPreviewFilterId(adjustments);
   const cropScaleX = cropOverlayVisible ? 1 : 1 / crop.width;
   const cropScaleY = cropOverlayVisible ? 1 : 1 / crop.height;
   const orientedAspectRatio = rotated ? dimensions.height / dimensions.width : dimensions.width / dimensions.height;
@@ -1499,7 +1501,7 @@ export function OnboardEditor() {
   }
   const canvasStyle: CSSProperties = {};
   const videoStyle: CSSProperties = {
-    filter: `url(#onboard-adjustments) saturate(${previewSaturation})`,
+    filter: `url(#${previewFilterId}) saturate(${previewSaturation})`,
     width: `${(rotated ? dimensions.width / dimensions.height : 1) * cropScaleX * 100}%`,
     height: `${(rotated ? dimensions.height / dimensions.width : 1) * cropScaleY * 100}%`,
     left: `${(0.5 + videoOffsetX) * 100}%`,
@@ -1561,6 +1563,27 @@ export function OnboardEditor() {
       />
     );
   }
+  function renderGifSettingGroup(key: keyof GifExportSettings, label: string) {
+    return (
+      <fieldset className="export-setting-group">
+        <legend>{label}</legend>
+        <div className="export-setting-options" role="group" aria-label={`${label} level`}>
+          {GIF_EXPORT_SETTING_LEVELS.map((level) => (
+            <button
+              type="button"
+              className={`export-setting-option${gifSettings[key] === level ? ' active' : ''}`}
+              aria-pressed={gifSettings[key] === level}
+              key={level}
+              onClick={() => setGifSettings((current) => ({ ...current, [key]: level }))}
+            >
+              <span>{level[0].toUpperCase()}{level.slice(1)}</span>
+              <small>{GIF_EXPORT_SETTING_VALUES[key][level].label}</small>
+            </button>
+          ))}
+        </div>
+      </fieldset>
+    );
+  }
   const [selectedAdjustmentKey, selectedAdjustmentLabel] = ADJUSTMENTS.find(([key]) => key === mobileAdjustment) ?? ADJUSTMENTS[0];
   const adjustmentMinimum = isIncreaseOnlyAdjustment(selectedAdjustmentKey) ? 0 : -100;
   const adjustmentTickValues = Array.from(
@@ -1603,63 +1626,36 @@ export function OnboardEditor() {
             <button
               className="export-button"
               type="button"
-              onClick={startExport}
+              aria-haspopup="dialog"
+              aria-expanded={exportMenuOpen}
+              aria-controls="desktop-export-menu"
+              onClick={() => setExportMenuOpen((open) => !open)}
               disabled={!file || !duration || !sourceDimensionsValid || !segments.length || isStitching}
             >
-              <Download size={15} /> Export {exportFormat.toUpperCase()}
-              {exportFormat === 'gif' && <span className="export-quality-label"> · {gifQuality[0].toUpperCase()}{gifQuality.slice(1)}</span>}
-            </button>
-            <button
-              className="export-dropdown-toggle"
-              type="button"
-              aria-label="Choose export settings"
-              aria-haspopup="menu"
-              aria-expanded={exportMenuOpen}
-              onClick={() => setExportMenuOpen((open) => !open)}
-            >
-              <ChevronDown size={15} />
+              <Download size={15} /> Export <ChevronDown size={15} />
             </button>
             {exportMenuOpen && (
-              <div className="export-format-menu" role="menu" aria-label="Export settings">
+              <div id="desktop-export-menu" className="export-format-menu" role="dialog" aria-label="Export settings">
+                <div className="export-menu-heading">GIF settings</div>
+                {renderGifSettingGroup('frameRate', 'Frame rate')}
+                {renderGifSettingGroup('resolution', 'Resolution')}
+                {renderGifSettingGroup('colors', 'Palette colors')}
+                <div className="export-menu-divider" role="separator" />
                 {(['gif', 'mp4'] as const).map((format) => (
                   <button
-                    className="export-format-option"
+                    className="export-format-option export-format-action"
                     key={format}
                     type="button"
-                    role="menuitemradio"
-                    aria-checked={exportFormat === format}
-                    onClick={() => chooseExportFormat(format)}
+                    disabled={!file || !duration || !sourceDimensionsValid || !segments.length || isStitching}
+                    onClick={() => {
+                      startExport(format);
+                      setExportMenuOpen(false);
+                    }}
                   >
-                    {format === exportFormat && <Check size={14} />}
-                    <span>Export as {format.toUpperCase()}</span>
+                    <Download size={14} />
+                    <span>Export {format.toUpperCase()}</span>
                   </button>
                 ))}
-                {exportFormat === 'gif' && (
-                  <>
-                    <div className="export-menu-divider" role="separator" />
-                    <div className="export-menu-heading">GIF quality</div>
-                    {(['low', 'medium', 'high'] as const).map((quality) => (
-                      <button
-                        className="export-format-option export-quality-option"
-                        key={quality}
-                        type="button"
-                        role="menuitemradio"
-                        aria-checked={gifQuality === quality}
-                        onClick={() => {
-                          setGifQuality(quality);
-                          setExportMenuOpen(false);
-                        }}
-                      >
-                        {gifQuality === quality && <Check size={14} />}
-                        <span className="export-quality-copy">
-                          <strong>{quality[0].toUpperCase()}{quality.slice(1)}</strong>
-                          <small>{GIF_QUALITY_DESCRIPTIONS[quality]}</small>
-                        </span>
-                      </button>
-                    ))}
-                    <p className="export-menu-note">Size varies with image detail and motion.</p>
-                  </>
-                )}
               </div>
             )}
           </div>
@@ -1709,7 +1705,7 @@ export function OnboardEditor() {
                         {job.status === 'queued'
                           ? `Queued · ${job.format.toUpperCase()}`
                           : job.status === 'exporting'
-                            ? `Exporting ${job.format.toUpperCase()}${job.format === 'gif' ? ` · ${job.gifQuality[0].toUpperCase()}${job.gifQuality.slice(1)}` : ''} · ${job.progress}%`
+                            ? `Exporting ${job.format.toUpperCase()}${job.format === 'gif' ? ` · ${describeGifSettings(job.gifSettings)}` : ''} · ${job.progress}%`
                             : job.status === 'completed'
                               ? `Downloaded · ${formatByteCount(job.outputBytes ?? 0)} (${(job.outputBytes ?? 0).toLocaleString()} bytes)`
                               : job.error}
@@ -1750,46 +1746,28 @@ export function OnboardEditor() {
                 <X size={18} />
               </button>
             </div>
-            <div className="mobile-export-options" role="group" aria-label="Output format">
+            <div className="mobile-gif-settings" role="group" aria-label="GIF export settings">
+              <div className="export-menu-heading">GIF settings</div>
+              {renderGifSettingGroup('frameRate', 'Frame rate')}
+              {renderGifSettingGroup('resolution', 'Resolution')}
+              {renderGifSettingGroup('colors', 'Palette colors')}
+            </div>
+            <div className="mobile-export-format-actions" role="group" aria-label="Choose output format to export">
               {(['gif', 'mp4'] as const).map((format) => (
                 <button
                   type="button"
-                  aria-pressed={exportFormat === format}
-                  className={exportFormat === format ? 'active' : ''}
+                  className="export-format-action"
                   key={format}
-                  onClick={() => chooseExportFormat(format)}
+                  disabled={!file || !duration || !sourceDimensionsValid || !segments.length || isStitching}
+                  onClick={() => {
+                    startExport(format);
+                    setMobileExportSettingsOpen(false);
+                  }}
                 >
-                  {format.toUpperCase()}
+                  <Download size={14} /> Export {format.toUpperCase()}
                 </button>
               ))}
             </div>
-            {exportFormat === 'gif' && (
-              <div className="mobile-export-quality" role="group" aria-label="GIF quality">
-                {(['low', 'medium', 'high'] as const).map((quality) => (
-                  <button
-                    type="button"
-                    aria-pressed={gifQuality === quality}
-                    className={gifQuality === quality ? 'active' : ''}
-                    key={quality}
-                    onClick={() => setGifQuality(quality)}
-                  >
-                    <strong>{quality[0].toUpperCase()}{quality.slice(1)}</strong>
-                    <small>{GIF_QUALITY_DESCRIPTIONS[quality]}</small>
-                  </button>
-                ))}
-              </div>
-            )}
-            <button
-              className="mobile-export-confirm"
-              type="button"
-              disabled={!file || !duration || !sourceDimensionsValid || !segments.length || isStitching}
-              onClick={() => {
-                startExport();
-                setMobileExportSettingsOpen(false);
-              }}
-            >
-              Export {exportFormat.toUpperCase()}
-            </button>
           </section>
         </div>
       )}
@@ -1983,7 +1961,7 @@ export function OnboardEditor() {
             onDrop={dropVideo}
           >
             <svg className="preview-filter-defs" aria-hidden="true">
-              <filter id="onboard-adjustments" x="-20%" y="-20%" width="140%" height="140%" colorInterpolationFilters="sRGB">
+              <filter id={previewFilterId} x="-20%" y="-20%" width="140%" height="140%" colorInterpolationFilters="sRGB">
                 <feComponentTransfer result="color-adjusted">
                   <feFuncR type="table" tableValues={previewTransferTable} />
                   <feFuncG type="table" tableValues={previewTransferTable} />
@@ -2605,6 +2583,12 @@ function createSavedLookThumbnail(
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
+}
+
+function describeGifSettings(settings: GifExportSettings) {
+  const profile = getGifEncodingProfile(settings);
+  const resolution = profile.maxDimension ? `max ${profile.maxDimension}px` : 'source resolution';
+  return `${profile.frameRate} fps · ${resolution} · ${profile.maxColors} colors`;
 }
 
 function downloadExport(output: Blob, fileName: string) {

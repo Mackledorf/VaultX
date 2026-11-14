@@ -26,7 +26,7 @@ const mediaExtensions: Record<string, MediaType> = {
   gif: 'gif', mp4: 'video', webm: 'video', mov: 'video',
 };
 
-function mediaType(name: string): MediaType | undefined {
+export function mediaType(name: string): MediaType | undefined {
   const extension = name.split('.').pop()?.toLowerCase();
   return extension && name.includes('.') && Object.prototype.hasOwnProperty.call(mediaExtensions, extension) ? mediaExtensions[extension] : undefined;
 }
@@ -69,7 +69,7 @@ export async function createParent(directory: LocalDirectoryHandle, name: string
   await createFolder(directory, name);
 }
 
-function cleanKeywords(values: string[], maxItems?: number): string[] {
+export function cleanKeywords(values: string[], maxItems?: number): string[] {
   const unique = new Map<string, string>();
   for (const value of values) {
     const keyword = value.normalize('NFKC').trim().replace(/\s+/g, ' ');
@@ -129,6 +129,39 @@ async function addItemMetadata(directory: LocalDirectoryHandle, item: VaultItem)
     metadata.items.push(item);
     metadata.keywords = cleanKeywords([...metadata.keywords, ...item.keywords]);
   });
+}
+
+export async function createKeyword(directory: LocalDirectoryHandle, value: string): Promise<string> {
+  const [keyword] = cleanKeywords([value]);
+  if (!keyword) throw new Error('Enter a keyword.');
+  await updateMetadata(directory, (metadata) => {
+    metadata.keywords = cleanKeywords([...metadata.keywords, keyword]);
+  });
+  return keyword;
+}
+
+export async function checkRecoveryState(directory: LocalDirectoryHandle): Promise<void> {
+  const metadata = await readVaultMetadata(directory);
+  if (!metadata) throw new Error('The vault marker is missing. No files were changed.');
+  for await (const entry of directory.values()) {
+    if (entry.kind === 'file' && (entry.name.startsWith('.vaultx-backup-') || entry.name.startsWith('.vaultx-operation-')) && entry.name.endsWith('.json')) {
+      throw new Error('Resolve the incomplete operation or metadata backup in the vault folder before making changes. See LOCAL-VAULT.md.');
+    }
+  }
+}
+
+export class ImportError extends Error {
+  readonly phase: 'copy' | 'metadata';
+  readonly destination: string;
+  readonly permissionDenied: boolean;
+
+  constructor(message: string, phase: 'copy' | 'metadata', destination: string, permissionDenied = false) {
+    super(message);
+    this.name = 'ImportError';
+    this.phase = phase;
+    this.destination = destination;
+    this.permissionDenied = permissionDenied;
+  }
 }
 
 async function currentMediaHandle(directory: LocalDirectoryHandle, item: LocalMedia): Promise<FileSystemFileHandle> {
@@ -236,13 +269,13 @@ export async function importMedia(directory: LocalDirectoryHandle, parent: strin
     await writeNewFile(folder, name, file);
   } catch (error) {
     const detail = error instanceof Error ? error.message : 'Unknown error.';
-    throw new Error(`Could not finish copying to ${parent}/${name}. Inspect that location before retrying. ${detail}`);
+    throw new ImportError(`Could not finish copying to ${parent}/${name}. Inspect that location before retrying. ${detail}`, 'copy', `${parent}/${name}`, error instanceof DOMException && error.name === 'NotAllowedError');
   }
   try {
     await addItemMetadata(directory, { parent, file: name, keywords });
   } catch (error) {
     const detail = error instanceof Error ? error.message : 'Unknown error.';
-    throw new Error(`The file was copied to ${parent}/${name}, but its metadata update needs attention. ${detail}`);
+    throw new ImportError(`The file was copied to ${parent}/${name}, but its metadata update needs attention. ${detail}`, 'metadata', `${parent}/${name}`);
   }
   return name;
 }

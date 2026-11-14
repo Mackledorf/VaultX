@@ -6,9 +6,11 @@ VaultX is a browser interface for a media vault stored in a folder on your own d
 
 Use a supported desktop browser such as Chrome or Edge over HTTPS or localhost. Choose an existing folder or select **New vault**, enter a name, and choose where its folder should be created. If an existing folder is not already a vault, explicitly initialize it to create `vaultx.json`. The app reads media from immediate child folders as parent tags and searches existing keyword metadata. Select **Refresh** to pick up external changes. Close the vault to return to folder selection.
 
-Create a parent from the Parent Tag filter and use **Add media** to copy one supported file into it with optional comma-separated keywords. Open an item to edit its keywords, copy it to another parent, or move it. Copy retains the original; move verifies a new copy before removing the source. Imported, copied, and moved files receive unique filenames. Existing unindexed media can be assigned keywords.
+With a vault open, use **Add media** or drop files or folders onto the page. Select a parent and optional keywords for each supported file, then choose **Import media**. Folder imports include nested files; each is copied into its selected parent, not the source folder hierarchy. Unsupported or unreadable entries are reported. New parent tags in the batch are created when importing; new keyword tags are saved immediately, even if the batch is canceled.
 
-This is an experimental prototype: standalone keyword creation, deletion, batch imports, folder drag-and-drop, and automatic recovery are not implemented. Root-level media and nested folders are reported but not scanned. Real Windows browser behavior has not yet been verified.
+Type to find or create parent and keyword tags. The keyword filter shows media containing all selected tags. Open an item to edit its keywords, copy it to another parent, or move it. Copy retains the original; move verifies a new copy before removing the source. Imported, copied, and moved files receive unique filenames. Existing unindexed media can be assigned keywords.
+
+This is an experimental prototype: deletion and automatic recovery are not implemented. Root-level media and nested folders already inside a vault are reported but not scanned. Real Windows browser behavior has not yet been verified.
 
 ## Folder access and privacy
 
@@ -16,7 +18,7 @@ VaultX uses the browser's File System Access API. You select a folder and grant 
 
 Media is processed locally, not uploaded. The vault is not encrypted by VaultX. Back up the entire vault, including `vaultx.json`, and protect the computer and backups separately. A hosted site's code can access the folder you authorize, so the site and its dependencies must be trusted.
 
-Writes are coordinated between tabs of the same origin. Avoid editing the vault simultaneously in other applications, browser origins, or sync clients: browser filesystem operations are not cross-file transactions and cannot eliminate external races. **Back up the vault before testing moves.** If an operation is interrupted, it can leave a copy, a `.vaultx-operation-*.json` move record, or a `.vaultx-backup-*.json` metadata backup. VaultX blocks further writes until these files are resolved. See [recovery instructions](LOCAL-VAULT.md#recovering-an-interrupted-operation) before making changes.
+Writes are coordinated between tabs of the same origin. Avoid editing the vault simultaneously in other applications, browser origins, or sync clients: browser filesystem operations are not cross-file transactions and cannot eliminate external races. **Back up the vault before testing.** A batch continues after ordinary item failures, but pauses if metadata or permission needs attention. Inspect incomplete copies before retrying; uncertain items are not retried automatically. An interrupted write can leave a copy, a `.vaultx-operation-*.json` move record, or a `.vaultx-backup-*.json` metadata backup. VaultX blocks further writes until recovery files are resolved. See [recovery instructions](LOCAL-VAULT.md#recovering-an-interrupted-operation).
 
 ## Local development and deployment
 

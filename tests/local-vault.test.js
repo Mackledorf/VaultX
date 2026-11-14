@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createParent, createVault, importMedia, initializeVault, moveMedia, parseVaultMetadata, readVaultMetadata, scanVault, updateMediaKeywords } from '../src/lib/local-vault.ts';
+import { checkRecoveryState, createKeyword, createParent, createVault, importMedia, ImportError, initializeVault, moveMedia, parseVaultMetadata, readVaultMetadata, scanVault, updateMediaKeywords } from '../src/lib/local-vault.ts';
 
 function fakeFile(name, initial = '') {
   let contents = initial;
@@ -296,4 +296,50 @@ test('a failure after removing the source retains the verified copy and recovery
   assert.equal(scan.missing.length, 1);
   assert.equal(scan.pendingOperations.length, 1);
   assert.equal(scan.recoveryBackups.length, 1);
+});
+
+test('creating a keyword saves the normalized vocabulary without media and deduplicates', async () => {
+  const vault = fakeDirectory('vault');
+  await initializeVault(vault);
+  await createKeyword(vault, '  Coast   sunset ');
+  await createKeyword(vault, 'coast sunset');
+  assert.deepEqual((await readVaultMetadata(vault)).keywords, ['Coast sunset']);
+  await assert.rejects(() => createKeyword(vault, 'x'.repeat(65)), /64 characters/);
+  assert.deepEqual((await readVaultMetadata(vault)).items, []);
+});
+
+test('recovery files block later writes and metadata errors identify uncertain imports', async () => {
+  const vault = fakeDirectory('vault');
+  await initializeVault(vault);
+  await createParent(vault, 'Photos');
+  const marker = await vault.getFileHandle('vaultx.json');
+  marker.createWritable = async () => { throw new DOMException('Denied', 'NotAllowedError'); };
+  await assert.rejects(() => importMedia(vault, 'Photos', new File(['image'], 'photo.jpg'), []), (error) => {
+    assert.ok(error instanceof ImportError);
+    assert.equal(error.phase, 'metadata');
+    assert.match(error.destination, /^Photos\/.+\.jpg$/);
+    return true;
+  });
+  await assert.rejects(() => checkRecoveryState(vault), /Resolve the incomplete operation/);
+});
+
+test('import copy errors expose permission loss and the destination for inspection', async () => {
+  const vault = fakeDirectory('vault');
+  await initializeVault(vault);
+  await createParent(vault, 'Photos');
+  const folder = await vault.getDirectoryHandle('Photos');
+  const getFileHandle = folder.getFileHandle;
+  folder.getFileHandle = async (name, options) => {
+    const handle = await getFileHandle(name, options);
+    if (options?.create) handle.createWritable = async () => { throw new DOMException('Denied', 'NotAllowedError'); };
+    return handle;
+  };
+  await assert.rejects(() => importMedia(vault, 'Photos', new File(['image'], 'photo.jpg'), []), (error) => {
+    assert.ok(error instanceof ImportError);
+    assert.equal(error.phase, 'copy');
+    assert.equal(error.permissionDenied, true);
+    assert.match(error.destination, /^Photos\/.+\.jpg$/);
+    return true;
+  });
+  assert.deepEqual((await readVaultMetadata(vault)).items, []);
 });

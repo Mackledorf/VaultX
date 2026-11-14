@@ -4,6 +4,13 @@ This log records product and interface iterations so prior decisions can be unde
 
 ## 2026-11-14
 
+### Restored live adjustment previews and expanded GIF export choices
+
+- Force paused video previews to refresh when an adjustment changes by updating the referenced SVG filter ID along with its values.
+- Replaced the split export/download and dropdown controls with one opaque Export dropdown. Selecting GIF or MP4 starts that format; GIF settings independently control frame rate, resolution, and palette colors, with Low/Medium/High options for each.
+- Removed the size-varies note from the export menu and report the chosen GIF settings with queued exports.
+- Rationale: make edits visible while adjusting and give users direct control of GIF motion, detail, and palette trade-offs without adding output-size caps.
+
 ### Tightened mobile editing controls and panel spacing
 
 - Hid mobile timeline ruler labels while retaining the timeline tick marks. Replaced the adjustment abbreviations with icons, added a thin gray button outline and value ticks, and removed the redundant adjustment name above the slider.

@@ -1,23 +1,52 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  DEFAULT_GIF_QUALITY,
-  GIF_QUALITY_PROFILES,
+  DEFAULT_GIF_EXPORT_SETTINGS,
+  GIF_EXPORT_SETTING_VALUES,
+  getGifEncodingProfile,
 } from './exportSizing';
 
-test('defaults to Medium and keeps every GIF quality profile at 15 fps', () => {
-  assert.equal(DEFAULT_GIF_QUALITY, 'medium');
-  assert.ok(Object.values(GIF_QUALITY_PROFILES).every(({ frameRate }) => frameRate === 15));
+test('defaults GIF frame rate, resolution, and palette choices to Medium', () => {
+  assert.deepEqual(DEFAULT_GIF_EXPORT_SETTINGS, {
+    frameRate: 'medium',
+    resolution: 'medium',
+    colors: 'medium',
+  });
+  assert.deepEqual(getGifEncodingProfile(DEFAULT_GIF_EXPORT_SETTINGS), {
+    frameRate: 15,
+    maxDimension: 960,
+    maxColors: 192,
+    dither: 'bayer:bayer_scale=3',
+  });
 });
 
-test('offers ordered quality trade-offs in palette size and output dimensions', () => {
-  const { low, medium, high } = GIF_QUALITY_PROFILES;
+test('offers three independent choices for GIF frame rate, resolution, and palette colors', () => {
+  const rates = GIF_EXPORT_SETTING_VALUES.frameRate;
+  const resolutions = GIF_EXPORT_SETTING_VALUES.resolution;
+  const colors = GIF_EXPORT_SETTING_VALUES.colors;
 
-  assert.ok(low.maxColors < medium.maxColors);
-  assert.ok(medium.maxColors < high.maxColors);
-  assert.ok(low.maxDimension! < medium.maxDimension!);
-  assert.equal(high.maxDimension, undefined);
-  assert.equal(low.dither, 'bayer:bayer_scale=3');
-  assert.equal(medium.dither, 'bayer:bayer_scale=3');
-  assert.equal(high.dither, 'sierra2_4a');
+  assert.deepEqual([rates.low.value, rates.medium.value, rates.high.value], [10, 15, 25]);
+  assert.ok(resolutions.low.value < resolutions.medium.value);
+  assert.equal(resolutions.high.value, undefined);
+  assert.deepEqual([colors.low.value, colors.medium.value, colors.high.value], [64, 192, 256]);
+});
+
+test('combines GIF settings independently into the requested encoding profile', () => {
+  const profile = getGifEncodingProfile({
+    frameRate: 'high',
+    resolution: 'low',
+    colors: 'medium',
+  });
+
+  assert.deepEqual(profile, {
+    frameRate: 25,
+    maxDimension: 720,
+    maxColors: 192,
+    dither: 'bayer:bayer_scale=3',
+  });
+  assert.equal(getGifEncodingProfile({
+    frameRate: 'medium',
+    resolution: 'high',
+    colors: 'high',
+  }).maxDimension, undefined);
 });

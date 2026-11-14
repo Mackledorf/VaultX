@@ -1,7 +1,11 @@
 import { type FormEvent, type RefObject, useEffect, useRef, useState } from 'react';
-import { ChevronDown, Film } from 'lucide-react';
-import { createParent, createVault, importMedia, initializeVault, moveMedia, readVaultMetadata, scanVault, updateMediaKeywords, validateFolderName, type LocalDirectoryHandle, type LocalMedia, type VaultContents } from '../lib/local-vault';
+import { Film } from 'lucide-react';
+import { checkRecoveryState, createKeyword, createParent, createVault, importMedia, ImportError, initializeVault, moveMedia, readVaultMetadata, scanVault, updateMediaKeywords, validateFolderName, type LocalDirectoryHandle, type LocalMedia, type VaultContents } from '../lib/local-vault';
+import { captureDrop, collectDrop, type SourceCollection } from '../lib/import-sources';
 import { loadVaultHandle, saveVaultHandle } from '../lib/vault-handle';
+import { BatchImport, type BatchItem } from './BatchImport';
+import type { BatchResult } from '../lib/batch-import';
+import { TagPicker, tagKey } from './TagPicker';
 import type { MediaType } from '../types';
 
 type DirectoryPickerWindow = Window & {
@@ -19,6 +23,17 @@ async function withWriteLock<T>(action: () => Promise<T>): Promise<T> {
   return await navigator.locks.request('vaultx-local-write', action);
 }
 
+class BatchBlockedError extends Error {}
+
+async function ensureStagedParent(directory: LocalDirectoryHandle, name: string, staged: boolean): Promise<void> {
+  if (!staged) return;
+  try { await directory.getDirectoryHandle(name); }
+  catch (caught) {
+    if (!(caught instanceof DOMException && caught.name === 'NotFoundError')) throw caught;
+    await createParent(directory, name);
+  }
+}
+
 export function LocalVault() {
   const [remembered, setRemembered] = useState<LocalDirectoryHandle>();
   const [directory, setDirectory] = useState<LocalDirectoryHandle>();
@@ -27,15 +42,21 @@ export function LocalVault() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [query, setQuery] = useState('');
+  const [keywordFilter, setKeywordFilter] = useState<string[]>([]);
+  const [keywords, setKeywords] = useState<string[]>([]);
   const [parent, setParent] = useState('');
   const [type, setType] = useState<MediaType | 'all'>('all');
   const [selected, setSelected] = useState<LocalMedia>();
   const [creating, setCreating] = useState(false);
   const [vaultName, setVaultName] = useState('');
-  const [dialog, setDialog] = useState<'parent' | 'import' | 'copy' | 'move' | 'keywords'>();
+  const [dialog, setDialog] = useState<'import' | 'copy' | 'move' | 'keywords'>();
   const [writeError, setWriteError] = useState('');
   const [writing, setWriting] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [collecting, setCollecting] = useState(false);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [incoming, setIncoming] = useState<SourceCollection>();
+  const dragDepth = useRef(0);
   const picker = (window as DirectoryPickerWindow).showDirectoryPicker;
 
   useEffect(() => {
@@ -47,6 +68,56 @@ export function LocalVault() {
     });
     return () => { active = false; };
   }, []);
+
+  useEffect(() => {
+    function hasFiles(event: DragEvent) { return Array.from(event.dataTransfer?.types ?? []).includes('Files'); }
+    function enter(event: DragEvent) {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      dragDepth.current += 1;
+      if (directory && contents && !busy && !writing && !batchRunning && !collecting && (!dialog || dialog === 'import') && !(selected && !dialog)) setDragging(true);
+    }
+    function over(event: DragEvent) { if (hasFiles(event)) event.preventDefault(); }
+    function leave() {
+      if (!dragDepth.current) return;
+      dragDepth.current = Math.max(0, dragDepth.current - 1);
+      if (!dragDepth.current) setDragging(false);
+    }
+    function resetDrag() { dragDepth.current = 0; setDragging(false); }
+    function drop(event: DragEvent) {
+      if (!hasFiles(event) || !event.dataTransfer) return;
+      event.preventDefault();
+      dragDepth.current = 0;
+      setDragging(false);
+      if (!directory || !contents || busy || writing || batchRunning || collecting || (dialog && dialog !== 'import') || (selected && !dialog)) return;
+      let captured: ReturnType<typeof captureDrop>;
+      try { captured = captureDrop(event.dataTransfer); }
+      catch (caught) {
+        setIncoming({ files: [], errors: [message(caught)] });
+        setDialog('import');
+        return;
+      }
+      setCollecting(true);
+      setDialog('import');
+      void collectDrop(captured).then((result) => {
+        setIncoming(result.files.length || result.errors.length ? result : { files: [], errors: ['No readable files were found in the drop.'] });
+      }).catch((caught: unknown) => {
+        setIncoming({ files: [], errors: [message(caught)] });
+      }).finally(() => setCollecting(false));
+    }
+    window.addEventListener('dragenter', enter);
+    window.addEventListener('dragover', over);
+    window.addEventListener('dragleave', leave);
+    window.addEventListener('drop', drop);
+    window.addEventListener('blur', resetDrag);
+    return () => {
+      window.removeEventListener('dragenter', enter);
+      window.removeEventListener('dragover', over);
+      window.removeEventListener('dragleave', leave);
+      window.removeEventListener('drop', drop);
+      window.removeEventListener('blur', resetDrag);
+    };
+  }, [directory, contents, busy, writing, batchRunning, collecting, dialog, selected]);
 
   async function open(handle: LocalDirectoryHandle) {
     const metadata = await readVaultMetadata(handle);
@@ -60,8 +131,9 @@ export function LocalVault() {
     setPending(undefined);
     setDirectory(handle);
     setContents(result);
+    setKeywords(metadata.keywords);
     setParent('');
-    setQuery('');
+    setKeywordFilter([]);
     setType('all');
     try {
       await saveVaultHandle(handle);
@@ -158,6 +230,7 @@ export function LocalVault() {
       const metadata = await readVaultMetadata(directory);
       if (!metadata) throw new Error('The vault marker is missing. No files were changed; restore it before refreshing.');
       setContents(await scanVault(directory, metadata));
+      setKeywords(metadata.keywords);
     } catch (caught) {
       setError(message(caught));
     } finally {
@@ -174,18 +247,14 @@ export function LocalVault() {
         throw new Error('Write access was not granted. No files were changed.');
       }
       await withWriteLock(async () => {
-        const metadata = await readVaultMetadata(directory);
-        if (!metadata) throw new Error('The vault marker is missing. No files were changed.');
-        const current = await scanVault(directory, metadata);
-        if (current.recoveryBackups.length || current.pendingOperations.length) {
-          throw new Error('Resolve the incomplete operation or metadata backup in the vault folder before making changes. See LOCAL-VAULT.md.');
-        }
+        await checkRecoveryState(directory);
         await action();
       });
       try {
         const metadata = await readVaultMetadata(directory);
         if (!metadata) throw new Error('The vault marker is missing.');
         setContents(await scanVault(directory, metadata));
+        setKeywords(metadata.keywords);
       } catch (caught) {
         throw new Error(`The change was saved, but the vault could not be refreshed. ${message(caught)}`);
       }
@@ -200,11 +269,56 @@ export function LocalVault() {
     }
   }
 
-  const terms = query.normalize('NFKC').toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
+  async function tagWrite<T>(action: () => Promise<T>, refreshContents = false): Promise<T> {
+    if (!directory) throw new Error('Open a vault first.');
+    setWriting(true);
+    try {
+      if (await directory.requestPermission({ mode: 'readwrite' }) !== 'granted') throw new Error('Write access was not granted. No files were changed.');
+      const result = await withWriteLock(async () => { await checkRecoveryState(directory); return action(); });
+      try {
+        const metadata = await readVaultMetadata(directory);
+        if (!metadata) throw new Error('The vault marker is missing.');
+        setKeywords(metadata.keywords);
+        if (refreshContents) setContents(await scanVault(directory, metadata));
+      } catch (caught) {
+        throw new Error(`The tag was saved, but the vault could not be refreshed. ${message(caught)}`);
+      }
+      return result;
+    } finally {
+      setWriting(false);
+    }
+  }
+
+  async function addKeyword(value: string): Promise<string> {
+    if (!directory) throw new Error('Open a vault first.');
+    return tagWrite(() => createKeyword(directory, value));
+  }
+
+  async function importItem(item: BatchItem, staged: boolean): Promise<BatchResult> {
+    if (!directory) return { status: 'failed', detail: 'The vault is not open.', pause: true };
+    if (!navigator.locks) return { status: 'pending', detail: 'This browser cannot safely coordinate vault writes. Use a current version of Chrome or Edge.', pause: true };
+    try {
+      await withWriteLock(async () => {
+        try { await checkRecoveryState(directory); }
+        catch (caught) { throw new BatchBlockedError(message(caught)); }
+        await ensureStagedParent(directory, item.parent, staged);
+        await importMedia(directory, item.parent, item.file, item.keywords);
+      });
+      return { status: 'saved' };
+    } catch (caught) {
+      if (caught instanceof ImportError) return { status: 'attention', detail: caught.message, pause: caught.phase === 'metadata' || caught.permissionDenied };
+      if (caught instanceof BatchBlockedError) return { status: 'pending', detail: caught.message, pause: true };
+      try { await checkRecoveryState(directory); }
+      catch (recovery) { return { status: 'pending', detail: `${message(caught)} ${message(recovery)}`, pause: true }; }
+      if (caught instanceof DOMException && caught.name === 'NotAllowedError') return { status: 'pending', detail: message(caught), pause: true };
+      return { status: 'failed', detail: message(caught) };
+    }
+  }
+
   const visible = contents?.media.filter((item) =>
     (!parent || item.parent === parent) &&
     (type === 'all' || item.type === type) &&
-    terms.every((term) => item.keywords.some((keyword) => keyword.normalize('NFKC').toLocaleLowerCase().includes(term))),
+    keywordFilter.every((term) => item.keywords.some((keyword) => tagKey(keyword) === tagKey(term))),
   ) ?? [];
 
   if (!directory || !contents) {
@@ -240,23 +354,24 @@ export function LocalVault() {
       <header className="topbar">
         <h1 className="local-vault-name">{directory.name}</h1>
         <div className="topbar-actions local-actions">
-          <button className="secondary" type="button" onClick={() => { setWriteError(''); setDialog('import'); }} disabled={busy}>Add media</button>
-          <button className="secondary" type="button" onClick={refresh} disabled={busy}>Refresh</button>
-          <button className="secondary" type="button" onClick={() => { setDirectory(undefined); setContents(undefined); setSelected(undefined); setError(''); }}>Close vault</button>
+          <button className="secondary" type="button" onClick={() => { setWriteError(''); setIncoming(undefined); setDialog('import'); }} disabled={busy || writing}>Add media</button>
+          <button className="secondary" type="button" onClick={refresh} disabled={busy || writing}>Refresh</button>
+          <button className="secondary" type="button" disabled={busy || writing} onClick={() => { setDirectory(undefined); setContents(undefined); setSelected(undefined); setError(''); }}>Close vault</button>
         </div>
       </header>
       <section className="search-section local-controls">
-        <FilterDropdown label="Parent tag" value={parent} onChange={setParent} options={[
-          { value: '', label: 'Parent Tag' },
-          ...contents.parents.map((name) => ({ value: name, label: name })),
-        ]} onCreate={() => { setWriteError(''); setDialog('parent'); }} />
-        <input aria-label="Search keywords" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search keywords" />
-        <FilterDropdown label="Media type" value={type} onChange={setType} options={[
-          { value: 'all', label: 'All media' },
-          { value: 'image', label: 'Images' },
-          { value: 'gif', label: 'GIFs' },
-          { value: 'video', label: 'Videos' },
-        ]} />
+        <TagPicker label="Parent tag" placeholder="Parent Tag" values={parent ? [parent] : []} options={contents.parents} disabled={writing}
+          onChange={(values) => setParent(values[0] ?? '')} onCreate={async (name) => {
+            const valid = validateFolderName(name);
+            await tagWrite(() => createParent(directory, valid), true);
+            return valid;
+          }} />
+        <TagPicker label="Search keywords" placeholder="Search keywords" values={keywordFilter} options={keywords} multiple disabled={writing}
+          onChange={setKeywordFilter} onCreate={addKeyword} />
+        <div className="media-type-buttons" role="group" aria-label="Media type">
+          {([['all', 'All'], ['image', 'Images'], ['gif', 'GIFs'], ['video', 'Videos']] as const).map(([value, label]) =>
+            <button type="button" key={value} aria-pressed={type === value} onClick={() => setType(value)}>{label}</button>)}
+        </div>
       </section>
       <section className="results-section">
         {error && <p className="error" role="alert">{error}</p>}
@@ -278,62 +393,27 @@ export function LocalVault() {
         onCopy={() => { setWriteError(''); setDialog('copy'); }}
         onMove={() => { setWriteError(''); setDialog('move'); }}
         onKeywords={() => { setWriteError(''); setDialog('keywords'); }} />}
-      {dialog && <WriteDialog key={dialog} mode={dialog} parents={contents.parents} item={selected} error={writeError} writing={writing}
+      {dialog === 'import' && <BatchImport parents={contents.parents} keywords={keywords} incoming={incoming} writing={writing || collecting}
+        onIncomingConsumed={(value) => setIncoming((current) => current === value ? undefined : current)} onCreateKeyword={addKeyword}
+        onPermission={async () => {
+          if (await directory.requestPermission({ mode: 'readwrite' }) !== 'granted') throw new Error('Write access was not granted. No files were changed.');
+        }}
+        onImport={importItem}
+        onRefresh={async () => {
+          const metadata = await readVaultMetadata(directory);
+          if (!metadata) throw new Error('The vault marker is missing.');
+          setKeywords(metadata.keywords);
+          setContents(await scanVault(directory, metadata));
+        }} onRunningChange={setBatchRunning}
+        onClose={() => { setDialog(undefined); setIncoming(undefined); }} />}
+      {dialog && dialog !== 'import' && <WriteDialog key={dialog} mode={dialog} parents={contents.parents} keywords={keywords} item={selected} error={writeError} writing={writing}
         onClose={() => { setDialog(undefined); setWriteError(''); }}
-        onCreateParent={(name) => write(() => createParent(directory, name))}
-        onCopy={(destination, source) => write(async () => { await importMedia(directory, destination, await source.handle.getFile(), source.keywords); })}
-        onMove={(destination, source) => write(() => moveMedia(directory, source, destination))}
-        onKeywords={(source, keywords) => write(() => updateMediaKeywords(directory, source, keywords))}
-        onImport={(destination, file, keywords) => write(async () => { await importMedia(directory, destination, file, keywords); })} />}
+        onCreateKeyword={addKeyword}
+        onCopy={(destination, source, staged) => write(async () => { await ensureStagedParent(directory, destination, staged); await importMedia(directory, destination, await source.handle.getFile(), source.keywords); })}
+        onMove={(destination, source, staged) => write(async () => { await ensureStagedParent(directory, destination, staged); await moveMedia(directory, source, destination); })}
+        onKeywords={(source, values) => write(() => updateMediaKeywords(directory, source, values))} />}
+      {dragging && <div className="drag-overlay" aria-hidden="true">Drop files or folders to import</div>}
     </main>
-  );
-}
-
-function FilterDropdown<T extends string>({ label, value, options, onChange, onCreate }: {
-  label: string;
-  value: T;
-  options: { value: T; label: string }[];
-  onChange: (value: T) => void;
-  onCreate?: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const buttonRef = useRef<HTMLButtonElement>(null);
-  const selectedLabel = options.find((option) => option.value === value)?.label;
-
-  useEffect(() => {
-    if (!open) return;
-    function onPointerDown(event: PointerEvent) {
-      if (event.target instanceof Node && !containerRef.current?.contains(event.target)) setOpen(false);
-    }
-    document.addEventListener('pointerdown', onPointerDown);
-    return () => document.removeEventListener('pointerdown', onPointerDown);
-  }, [open]);
-
-  return (
-    <div className="local-dropdown" ref={containerRef} onBlur={(event) => {
-      if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
-    }} onKeyDown={(event) => {
-      if (event.key === 'Escape' && open) {
-        event.preventDefault();
-        setOpen(false);
-        buttonRef.current?.focus();
-      }
-    }}>
-      <button ref={buttonRef} className="local-dropdown-trigger" type="button" aria-label={`${label}: ${selectedLabel}`} aria-expanded={open} onClick={() => setOpen(!open)}>
-        <span>{selectedLabel}</span><ChevronDown size={16} aria-hidden="true" />
-      </button>
-      {open && <div className="local-dropdown-options" role="group" aria-label={`${label} options`}>
-        {options.map((option) => (
-          <button type="button" key={option.value} aria-pressed={option.value === value} onClick={() => {
-            onChange(option.value);
-            setOpen(false);
-            buttonRef.current?.focus();
-          }}>{option.label}</button>
-        ))}
-        {onCreate && <button type="button" onClick={() => { setOpen(false); onCreate(); }}>+ New parent</button>}
-      </div>}
-    </div>
   );
 }
 
@@ -412,23 +492,21 @@ function LocalDetail({ item, onClose, onCopy, onMove, onKeywords }: { item: Loca
   );
 }
 
-function WriteDialog({ mode, parents, item, error, writing, onClose, onCreateParent, onCopy, onMove, onKeywords, onImport }: {
-  mode: 'parent' | 'import' | 'copy' | 'move' | 'keywords';
+function WriteDialog({ mode, parents, keywords, item, error, writing, onClose, onCreateKeyword, onCopy, onMove, onKeywords }: {
+  mode: 'copy' | 'move' | 'keywords';
   parents: string[];
+  keywords: string[];
   item?: LocalMedia;
   error: string;
   writing: boolean;
   onClose: () => void;
-  onCreateParent: (name: string) => Promise<boolean>;
-  onCopy: (parent: string, item: LocalMedia) => Promise<boolean>;
-  onMove: (parent: string, item: LocalMedia) => Promise<boolean>;
+  onCreateKeyword: (value: string) => Promise<string>;
+  onCopy: (parent: string, item: LocalMedia, staged: boolean) => Promise<boolean>;
+  onMove: (parent: string, item: LocalMedia, staged: boolean) => Promise<boolean>;
   onKeywords: (item: LocalMedia, keywords: string[]) => Promise<boolean>;
-  onImport: (parent: string, file: File, keywords: string[]) => Promise<boolean>;
 }) {
-  const [name, setName] = useState('');
-  const [destination, setDestination] = useState(mode === 'copy' || mode === 'move' ? parents.find((parent) => parent !== item?.parent) ?? '' : parents[0] ?? '');
-  const [file, setFile] = useState<File>();
-  const [keywords, setKeywords] = useState(item?.keywords.join(', ') ?? '');
+  const [destination, setDestination] = useState('');
+  const [selectedKeywords, setSelectedKeywords] = useState(item?.keywords ?? []);
   const [fileError, setFileError] = useState('');
   const dialogRef = useRef<HTMLFormElement>(null);
   useDialogFocus(dialogRef, onClose, writing);
@@ -436,46 +514,30 @@ function WriteDialog({ mode, parents, item, error, writing, onClose, onCreatePar
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setFileError('');
-    if (mode === 'parent') {
-      await onCreateParent(name);
-      return;
-    }
-    if (mode === 'keywords') {
-      if (!item) { setFileError('Select a media file first.'); return; }
-      await onKeywords(item, keywords.split(','));
-      return;
-    }
-    if (!destination) {
-      setFileError('Create or choose a parent folder first.');
-      return;
-    }
-    if (mode === 'copy' || mode === 'move') {
-      if (!item) { setFileError('Select a media file first.'); return; }
-      if (mode === 'copy') await onCopy(destination, item);
-      else await onMove(destination, item);
-      return;
-    }
-    if (!file) {
-      setFileError('Choose a media file.');
-      return;
-    }
-    await onImport(destination, file, keywords.split(','));
+    if (!item) { setFileError('Select a media file first.'); return; }
+    if (mode === 'keywords') { await onKeywords(item, selectedKeywords); return; }
+    if (!destination) { setFileError('Choose a parent folder first.'); return; }
+    const staged = !parents.some((parent) => tagKey(parent) === tagKey(destination));
+    if (mode === 'copy') await onCopy(destination, item, staged);
+    else await onMove(destination, item, staged);
   }
 
   return <div className="dialog-backdrop">
     <form ref={dialogRef} className="detail-dialog local-form" role="dialog" aria-modal="true" aria-labelledby="write-title" onSubmit={submit}>
-      <header className="dialog-header"><h2 id="write-title">{mode === 'parent' ? 'New parent' : mode === 'copy' ? 'Copy to parent' : mode === 'move' ? 'Move to parent' : mode === 'keywords' ? 'Edit keywords' : 'Add media'}</h2></header>
-      {mode === 'parent' ? <label>Parent name<input value={name} onChange={(event) => setName(event.target.value)} autoFocus required /></label> : <>
-        {mode === 'import' && <label>Media file<input type="file" accept=".jpg,.jpeg,.png,.webp,.gif,.mp4,.webm,.mov" onChange={(event) => setFile(event.target.files?.[0])} required /></label>}
-        {mode !== 'keywords' && <label>Parent tag<select value={destination} onChange={(event) => setDestination(event.target.value)} required>
-          <option value="">Choose a parent</option>
-          {parents.filter((parent) => (mode !== 'copy' && mode !== 'move') || parent !== item?.parent).map((parent) => <option key={parent} value={parent}>{parent}</option>)}
-        </select></label>}
-        {mode === 'import' || mode === 'keywords' ? <label>Keywords (optional)<input value={keywords} onChange={(event) => setKeywords(event.target.value)} placeholder="Separate with commas" autoFocus={mode === 'keywords'} /></label> : <p className="muted">{mode === 'move' ? 'The file will be copied and verified, then removed from its current folder. Back up your vault first.' : 'A copy will be added to the selected parent. The original stays in place.'}</p>}
-        {mode !== 'keywords' && !destination && <p className="muted">Create another parent from the Parent Tag filter first.</p>}
+      <header className="dialog-header"><h2 id="write-title">{mode === 'copy' ? 'Copy to parent' : mode === 'move' ? 'Move to parent' : 'Edit keywords'}</h2></header>
+      {mode === 'keywords' ? <TagPicker label="Keywords" placeholder="Keywords" values={selectedKeywords} options={keywords} multiple maxValues={30} disabled={writing}
+        onChange={setSelectedKeywords} onCreate={onCreateKeyword} /> : <>
+        <TagPicker label="Parent tag" placeholder="Parent tag" values={destination ? [destination] : []} options={parents.filter((parent) => parent !== item?.parent)} disabled={writing}
+          onChange={(values) => setDestination(values[0] ?? '')}
+          onCreate={async (name) => {
+            const valid = validateFolderName(name);
+            if (item && tagKey(valid) === tagKey(item.parent)) throw new Error('Choose a different parent.');
+            return valid;
+          }} />
+        <p className="muted">{mode === 'move' ? 'The file will be copied and verified, then removed from its current folder. Back up your vault first.' : 'A copy will be added to the selected parent. The original stays in place.'}</p>
       </>}
       {(fileError || error) && <p className="error" role="alert">{fileError || error}</p>}
-      <div className="form-actions"><button className="secondary" type="button" disabled={writing} onClick={onClose}>Cancel</button><button className="primary" type="submit" disabled={writing}>{writing ? 'Saving…' : mode === 'parent' ? 'Create parent' : mode === 'copy' ? 'Copy' : mode === 'move' ? 'Move file' : mode === 'keywords' ? 'Save keywords' : 'Add media'}</button></div>
+      <div className="form-actions"><button className="secondary" type="button" disabled={writing} onClick={onClose}>Cancel</button><button className="primary" type="submit" disabled={writing || (mode !== 'keywords' && !destination)}>{writing ? 'Saving…' : mode === 'copy' ? 'Copy' : mode === 'move' ? 'Move file' : 'Save keywords'}</button></div>
     </form>
   </div>;
 }

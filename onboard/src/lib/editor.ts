@@ -5,7 +5,7 @@ import wasmURL from '@ffmpeg/core/wasm?url';
 import type { VideoEditRecipe } from '../types';
 import { buildGifFilter, buildMp4Filter, preflightExport } from './recipe';
 import { describeFfmpegFailure } from './exportDiagnostics';
-import { DEFAULT_GIF_QUALITY, GIF_QUALITY_PROFILES, type GifQuality } from './exportSizing';
+import { DEFAULT_GIF_EXPORT_SETTINGS, getGifEncodingProfile, type GifExportSettings } from './exportSizing';
 import { getVideoContainerExtension } from './videoSource';
 
 export async function exportGif(
@@ -16,7 +16,7 @@ export async function exportGif(
   sourceHeight: number,
   onProgress: (progress: number) => void,
   signal: AbortSignal,
-  quality: GifQuality = DEFAULT_GIF_QUALITY,
+  settings: GifExportSettings = DEFAULT_GIF_EXPORT_SETTINGS,
 ) {
   const blob = await exportWithFfmpeg(
     file,
@@ -27,7 +27,7 @@ export async function exportGif(
     onProgress,
     signal,
     'gif',
-    quality,
+    settings,
   );
   if (blob.type !== 'image/gif') throw new Error('GIF export returned an invalid file.');
   return blob;
@@ -66,7 +66,7 @@ async function exportWithFfmpeg(
   onProgress: (progress: number) => void,
   signal: AbortSignal,
   format: 'gif' | 'mp4',
-  gifQuality: GifQuality | undefined,
+  gifSettings: GifExportSettings | undefined,
 ) {
   if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
   const normalizedRecipe = preflightExport(recipe, sourceDuration, sourceWidth, sourceHeight);
@@ -115,7 +115,7 @@ async function exportWithFfmpeg(
         '-i', inputPath,
         '-filter_complex', buildGifFilter(
           normalizedRecipe,
-          GIF_QUALITY_PROFILES[gifQuality ?? DEFAULT_GIF_QUALITY],
+          getGifEncodingProfile(gifSettings ?? DEFAULT_GIF_EXPORT_SETTINGS),
         ),
         '-map', '[out]',
         '-an',

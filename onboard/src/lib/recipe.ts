@@ -152,6 +152,15 @@ export function buildPreviewTransferTable(adjustments: Record<string, number>) {
   return Array.from({ length: 256 }, (_, value) => applyColorTransform(value / 255, transform) * 255);
 }
 
+export function buildPreviewFilterId(adjustments: Record<string, number>) {
+  const adjustmentKey = ADJUSTMENT_NAMES.map((name) => {
+    const value = Number(adjustments[name] ?? 0);
+    const token = Math.abs(Math.round(value * 1000)).toString(36);
+    return `${value < 0 ? 'n' : 'p'}${token}`;
+  }).join('-');
+  return `onboard-adjustments-${adjustmentKey}`;
+}
+
 function buildVideoSegmentFilters(recipe: VideoEditRecipe, frameRate: number, maxDimension?: number) {
   const { crop, adjustments, rotation } = recipe;
   const transform = getColorTransform(adjustments);
