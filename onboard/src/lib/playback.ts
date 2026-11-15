@@ -2,6 +2,17 @@ import type { VideoEditRecipe } from '../types';
 
 type VideoSegment = VideoEditRecipe['segments'][number];
 
+export function sourceTimeToEditedTime(time: number, segments: VideoSegment[]) {
+  let editedTime = 0;
+  for (const segment of segments) {
+    if (time >= segment.startTime && time < segment.endTime) {
+      return editedTime + (time - segment.startTime) / segment.playbackRate;
+    }
+    editedTime += (segment.endTime - segment.startTime) / segment.playbackRate;
+  }
+  return null;
+}
+
 export type PlaybackTransition =
   | { type: 'rate'; playbackRate: number }
   | { type: 'seek'; time: number; playbackRate: number; segmentIndex: number };

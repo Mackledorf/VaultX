@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildGifFilter, buildMp4Filter, buildPreviewFilterId, buildPreviewTransferTable, getEditedDuration, isTimeInSegments, normalizeEditRecipe, preflightExport, validateSourceDimensions } from './recipe';
-import { getGifEncodingProfile } from './exportSizing';
+import { buildMp4Filter, buildPreviewTransferTable, getAdjustmentRange, getEditedDuration, isTimeInSegments, normalizeEditRecipe, preflightExport, validateSourceDimensions } from './recipe';
 import type { VideoEditRecipe } from '../types';
 
 const baseRecipe: VideoEditRecipe = {
@@ -23,6 +22,35 @@ const baseRecipe: VideoEditRecipe = {
     denoise: 0,
   },
 };
+
+test('preview transfer follows the shared color curve and clips lighting extremes', () => {
+  const identity = buildPreviewTransferTable(baseRecipe.adjustments);
+  assert.ok(identity.every((value, index) => Math.abs(value - index / 255) < 1e-10));
+  const lifted = buildPreviewTransferTable({ ...baseRecipe.adjustments, brightness: 50, shadows: 50 });
+  assert.ok(lifted[0] > identity[0]);
+  assert.equal(lifted[255], 1);
+  assert.ok(lifted.every((value, index) => value >= 0 && value <= 1 && (index === 0 || value >= lifted[index - 1])));
+});
+
+test('uses finer lighting controls without changing the other adjustment ranges', () => {
+  for (const name of ['exposure', 'brilliance', 'highlights', 'shadows', 'contrast', 'brightness']) {
+    assert.deepEqual(getAdjustmentRange(name), { min: -50, max: 50, step: 5 });
+  }
+  assert.deepEqual(getAdjustmentRange('saturation'), { min: -100, max: 100, step: 10 });
+  assert.deepEqual(getAdjustmentRange('denoise'), { min: 0, max: 100, step: 10 });
+});
+
+test('trims and retimes audio for the same kept sections as the video', () => {
+  const recipe = {
+    ...baseRecipe,
+    segments: [{ startTime: 1, endTime: 3, playbackRate: 2 }, { startTime: 5, endTime: 6, playbackRate: 0.5 }],
+  };
+  const filter = buildMp4Filter(recipe, true);
+  assert.match(filter, /atrim=start=1:end=3,asetpts=PTS-STARTPTS,atempo=2,apad,atrim=duration=1\[audio0\]/);
+  assert.match(filter, /atrim=start=5:end=6,asetpts=PTS-STARTPTS,atempo=0\.5,apad,atrim=duration=2\[audio1\]/);
+  assert.match(filter, /\[audio0\]\[audio1\]concat=n=2:v=0:a=1\[aout\]/);
+  assert.doesNotMatch(buildMp4Filter(recipe, false), /\[0:a:0\]/);
+});
 
 test('normalizes valid multi-section editing settings and retains the selected adjustments', () => {
   const recipe = normalizeEditRecipe({
@@ -67,100 +95,13 @@ test('requires detail adjustments to be increase-only', () => {
   }
 });
 
-test('builds a GIF filter with cuts, rotations, crop, adjustments, and palette output', () => {
-  const recipe = normalizeEditRecipe({
-    ...baseRecipe,
-    segments: [{ startTime: 0, endTime: 2, playbackRate: 2 }, { startTime: 4, endTime: 8, playbackRate: 1 }],
-    rotation: 90,
-    crop: { x: 0.1, y: 0.2, width: 0.7, height: 0.6 },
-    adjustments: { ...baseRecipe.adjustments, denoise: 10, sharpness: 30, definition: 20 },
-  }, 10);
-  const filter = buildGifFilter(recipe);
-
-  assert.match(filter, /transpose=clock/);
-  assert.match(filter, /crop=iw\*0\.7:ih\*0\.6:iw\*0\.1:ih\*0\.2/);
-  assert.match(filter, /hqdn3d=/);
-  assert.match(filter, /unsharp=5:5:0\.440:5:5:0/);
-  assert.match(filter, /lutrgb=r='/);
-  assert.match(filter, /eq=saturation=1/);
-  assert.match(filter, /concat=n=2/);
-  assert.match(filter, /setpts=\(PTS-STARTPTS\)\/2/);
-  assert.match(filter, /setpts=\(PTS-STARTPTS\)\/1/);
-  assert.match(filter, /paletteuse=dither=sierra2_4a/);
-});
-
-test('applies explicit GIF quality options without changing the frame rate', () => {
-  const filter = buildGifFilter(baseRecipe, {
-    frameRate: 15,
-    maxDimension: 480,
-    maxColors: 64,
-    dither: 'bayer:bayer_scale=3',
-  });
-
-  assert.match(filter, /scale=w='min\(iw,480\)'/);
-  assert.match(filter, /fps=15,scale=w='min\(iw,480\)'/);
-  assert.match(filter, /palettegen=stats_mode=diff:max_colors=64/);
-  assert.match(filter, /paletteuse=dither=bayer:bayer_scale=3/);
-});
-
-test('uses independently selected GIF frame rate, resolution, and palette settings in the output filter', () => {
-  const filter = buildGifFilter(baseRecipe, getGifEncodingProfile({
-    frameRate: 'high',
-    resolution: 'low',
-    colors: 'low',
-  }));
-
-  assert.match(filter, /fps=25,scale=w='min\(iw,720\)'/);
-  assert.match(filter, /palettegen=stats_mode=diff:max_colors=64/);
-});
-
-test('samples output frames before frame-local adjustments but keeps temporal denoise before sampling', () => {
-  const defaultFilter = buildGifFilter(baseRecipe);
-  assert.ok(defaultFilter.indexOf('fps=15') < defaultFilter.indexOf('lutrgb='));
-
-  const scaledFilter = buildGifFilter(baseRecipe, { maxDimension: 480 });
-  assert.ok(scaledFilter.indexOf('fps=15') < scaledFilter.indexOf('scale=w='));
-
-  const denoisedFilter = buildGifFilter({
-    ...baseRecipe,
-    adjustments: { ...baseRecipe.adjustments, denoise: 20 },
-  });
-  assert.ok(denoisedFilter.indexOf('hqdn3d=') < denoisedFilter.indexOf('fps=15'));
-});
-
-test('applies clarity as an increase-only unsharp filter in GIF and MP4 exports', () => {
+test('applies clarity as an increase-only unsharp filter in MP4 exports', () => {
   const recipe = normalizeEditRecipe({
     ...baseRecipe,
     adjustments: { ...baseRecipe.adjustments, clarity: 40 },
   }, 10);
 
-  assert.match(buildGifFilter(recipe), /unsharp=7:7:0\.400:7:7:0/);
   assert.match(buildMp4Filter(recipe), /unsharp=7:7:0\.400:7:7:0/);
-});
-
-test('uses the same tonal transfer for the preview and encoded video', () => {
-  const identity = buildPreviewTransferTable(baseRecipe.adjustments);
-  assert.equal(identity.length, 256);
-  assert.equal(identity[0], 0);
-  assert.equal(identity[128], 128);
-  assert.equal(identity[255], 255);
-
-  const adjustments = { ...baseRecipe.adjustments, exposure: 40, shadows: 30, highlights: -20 };
-  const transfer = buildPreviewTransferTable(adjustments);
-  const recipe = normalizeEditRecipe({ ...baseRecipe, adjustments }, 10);
-  const filter = buildMp4Filter(recipe);
-
-  assert.notDeepEqual(transfer, identity);
-  assert.match(filter, /lutrgb=r='/);
-  assert.match(filter, /pow\(/);
-});
-
-test('changes the preview filter reference whenever an adjustment changes', () => {
-  const initialId = buildPreviewFilterId(baseRecipe.adjustments);
-  const changedId = buildPreviewFilterId({ ...baseRecipe.adjustments, exposure: 10 });
-
-  assert.equal(buildPreviewFilterId(baseRecipe.adjustments), initialId);
-  assert.notEqual(changedId, initialId);
 });
 
 test('builds an MP4 filter with edits, 30fps output, and browser-compatible dimensions', () => {

@@ -3,6 +3,7 @@ import { fetchFile } from '@ffmpeg/util';
 import coreURL from '@ffmpeg/core?url';
 import wasmURL from '@ffmpeg/core/wasm?url';
 import { describeFfmpegFailure } from './exportDiagnostics';
+import { videoHasAudio } from './mediaProbe';
 import { buildStitchFilter, getStitchOutputDimensions, type VideoDimensions } from './stitchRecipe';
 import { getVideoContainerExtension, isSupportedVideoFile } from './videoSource';
 
@@ -18,7 +19,7 @@ export async function stitchVideos(
   if (signal.aborted) throw new DOMException('Stitch cancelled.', 'AbortError');
 
   onProgress(0);
-  const dimensions: VideoDimensions[] = [];
+  const dimensions: Array<VideoDimensions & { duration: number }> = [];
   for (let index = 0; index < files.length; index += 1) {
     dimensions.push(await readVideoDimensions(
       files[index],
@@ -66,12 +67,18 @@ export async function stitchVideos(
       }
     }
 
-    const filter = buildStitchFilter(outputSize.width, outputSize.height, files.length);
+    const clips = [];
+    for (let index = 0; index < inputPaths.length; index += 1) {
+      if (signal.aborted) throw new DOMException('Stitch cancelled.', 'AbortError');
+      clips.push({ duration: dimensions[index].duration, hasAudio: await videoHasAudio(ffmpeg, inputPaths[index]) });
+    }
+    const hasAudio = clips.some((clip) => clip.hasAudio);
+    const filter = buildStitchFilter(outputSize.width, outputSize.height, clips);
     const args = [
       ...inputPaths.flatMap((inputPath) => ['-i', inputPath]),
       '-filter_complex', filter,
       '-map', '[outv]',
-      '-an',
+      ...(hasAudio ? ['-map', '[outa]', '-c:a', 'aac', '-b:a', '128k'] : ['-an']),
       '-c:v', 'libx264',
       '-preset', 'superfast',
       '-crf', '15',
@@ -121,7 +128,7 @@ function readVideoDimensions(
   file: File,
   signal: AbortSignal,
   onProgress: (progress: number) => void,
-): Promise<VideoDimensions> {
+): Promise<VideoDimensions & { duration: number }> {
   if (signal.aborted) return Promise.reject(new DOMException('Stitch cancelled.', 'AbortError'));
 
   const video = document.createElement('video');
@@ -138,14 +145,14 @@ function readVideoDimensions(
       URL.revokeObjectURL(objectUrl);
     };
     const onLoadedMetadata = () => {
-      const { videoWidth: width, videoHeight: height } = video;
+      const { videoWidth: width, videoHeight: height, duration } = video;
       cleanup();
-      if (width < 2 || height < 2) {
-        reject(new Error(`Could not read the dimensions of ${file.name}.`));
+      if (width < 2 || height < 2 || !Number.isFinite(duration) || duration <= 0) {
+        reject(new Error(`Could not read the dimensions or duration of ${file.name}.`));
         return;
       }
       onProgress(1);
-      resolve({ width, height });
+      resolve({ width, height, duration });
     };
     const onError = () => {
       cleanup();

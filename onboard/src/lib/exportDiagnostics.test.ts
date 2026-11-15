@@ -4,7 +4,7 @@ import { describeFfmpegFailure } from './exportDiagnostics';
 
 test('distinguishes source decoding failures from edit filter failures', () => {
   assert.match(
-    describeFfmpegFailure('gif', 1, ['Invalid data found when processing input']),
+    describeFfmpegFailure('mp4', 1, ['Invalid data found when processing input']),
     /could not decode the source video/,
   );
   assert.match(
@@ -13,11 +13,7 @@ test('distinguishes source decoding failures from edit filter failures', () => {
   );
 });
 
-test('reports GIF palette and browser memory failures with targeted guidance', () => {
-  assert.match(
-    describeFfmpegFailure('gif', 1, ['Error initializing filter palettegen']),
-    /GIF palette encoding failed/,
-  );
+test('reports browser memory failures with targeted guidance', () => {
   assert.match(
     describeFfmpegFailure('mp4', 1, ['Cannot allocate memory']),
     /ran out of memory/,
@@ -25,7 +21,7 @@ test('reports GIF palette and browser memory failures with targeted guidance', (
 });
 
 test('keeps generic failures explicit and includes a bounded diagnostic excerpt', () => {
-  const message = describeFfmpegFailure('gif', 1, ['frame processing stopped', 'Conversion failed!']);
+  const message = describeFfmpegFailure('mp4', 1, ['frame processing stopped', 'Conversion failed!']);
   assert.match(message, /does not establish that the video is damaged/);
   assert.match(message, /Conversion failed!/);
 });

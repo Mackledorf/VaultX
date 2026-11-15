@@ -1,16 +1,11 @@
 import { type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
 import { ArrowDownUp, ChevronDown, CircleDot, Combine, Contrast, Copy, Crop, Download, Droplets, Focus, Link2, List, ListRestart, Menu, Moon, Palette, Pause, Play, RefreshCw, RotateCw, ScanLine, Scissors, SlidersHorizontal, Sparkles, Sun, SunDim, SunMedium, Trash2, Upload, Video as VideoIcon, Waves, X } from 'lucide-react';
-import { exportGif as exportGifLocally, exportMp4 as exportMp4Locally } from '../lib/editor';
-import {
-  DEFAULT_GIF_EXPORT_SETTINGS,
-  GIF_EXPORT_SETTING_LEVELS,
-  GIF_EXPORT_SETTING_VALUES,
-  getGifEncodingProfile,
-  type GifExportSettings,
-} from '../lib/exportSizing';
+import { exportMp4 as exportMp4Locally } from '../lib/editor';
+import { createLivePreview } from '../lib/livePreview';
 import { getPlaybackTransition } from '../lib/playback';
-import { buildPreviewFilterId, buildPreviewTransferTable, getEditedDuration, isIncreaseOnlyAdjustment, isTimeInSegments, preflightExport, validateSourceDimensions } from '../lib/recipe';
+import { buildPreviewTransferTable, getAdjustmentRange, getColorTransform, getEditedDuration, isTimeInSegments, preflightExport, validateSourceDimensions } from '../lib/recipe';
 import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
+import { fetchSharedPost, isSharedPostUrl } from '../lib/sharedSource';
 import { stitchVideos } from '../lib/stitch';
 import { isSupportedVideoFile } from '../lib/videoSource';
 import type { VideoEditRecipe } from '../types';
@@ -83,8 +78,6 @@ type ExportJob = {
   duration: number;
   width: number;
   height: number;
-  format: 'gif' | 'mp4';
-  gifSettings: GifExportSettings;
   fileName: string;
   status: 'queued' | 'exporting' | 'completed' | 'error';
   progress: number;
@@ -92,19 +85,22 @@ type ExportJob = {
   error?: string;
   dismissed?: boolean;
 };
-
 export function OnboardEditor() {
   const fileInput = useRef<HTMLInputElement>(null);
   const stitchInput = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const livePreviewRef = useRef<HTMLCanvasElement>(null);
+  const drawLivePreviewRef = useRef<() => void>(() => {});
   const canvasRef = useRef<HTMLDivElement>(null);
   const timelineTrackRef = useRef<HTMLDivElement>(null);
   const exportControllers = useRef(new Map<string, AbortController>());
   const exportCompletionTimeouts = useRef(new Map<string, number>());
   const exportQueueRunning = useRef(false);
   const exportJobsRef = useRef<ExportJob[]>([]);
-  const exportMenuRef = useRef<HTMLDivElement>(null);
   const mobileActionsRef = useRef<HTMLDivElement>(null);
+  const brandMenuRef = useRef<HTMLDivElement>(null);
+  const brandButtonRef = useRef<HTMLButtonElement>(null);
+  const extensionInstructionsRef = useRef<HTMLDialogElement>(null);
   const remoteImportController = useRef<AbortController | null>(null);
   const stitchController = useRef<AbortController | null>(null);
   const dragRef = useRef<{
@@ -142,10 +138,9 @@ export function OnboardEditor() {
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState('');
   const [previewUrl, setPreviewUrl] = useState('');
-  const [exportFormat, setExportFormat] = useState<'gif' | 'mp4'>('gif');
-  const [gifSettings, setGifSettings] = useState<GifExportSettings>(DEFAULT_GIF_EXPORT_SETTINGS);
   const [exportJobs, setExportJobs] = useState<ExportJob[]>([]);
-  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [previewMode, setPreviewMode] = useState<'loading' | 'gpu' | 'fallback'>('loading');
+  const [previewStatus, setPreviewStatus] = useState('');
   const [isDraggingFile, setIsDraggingFile] = useState(false);
   const [duration, setDuration] = useState(0);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
@@ -154,7 +149,7 @@ export function OnboardEditor() {
   const [mobileAdjustment, setMobileAdjustment] = useState<AdjustmentKey>('exposure');
   const [showEditedDuration, setShowEditedDuration] = useState(false);
   const [mobileActionsOpen, setMobileActionsOpen] = useState(false);
-  const [mobileExportSettingsOpen, setMobileExportSettingsOpen] = useState(false);
+  const [brandMenuOpen, setBrandMenuOpen] = useState(false);
   const [timelineFrames, setTimelineFrames] = useState<string[]>([]);
   const [sourceDimensionsValid, setSourceDimensionsValid] = useState(false);
   const [videoFrameStyle, setVideoFrameStyle] = useState<CSSProperties>({});
@@ -174,6 +169,8 @@ export function OnboardEditor() {
   const [adjustments, setAdjustments] = useState<Record<string, number>>(
     Object.fromEntries(ADJUSTMENTS.map(([key]) => [key, 0])),
   );
+  const adjustmentsRef = useRef(adjustments);
+  adjustmentsRef.current = adjustments;
   const [savedLooks, setSavedLooks] = useState<SavedLook[]>([]);
   const [savedLooksVisible, setSavedLooksVisible] = useState(false);
   const [savingLook, setSavingLook] = useState(false);
@@ -253,22 +250,62 @@ export function OnboardEditor() {
   }, []);
 
   useEffect(() => {
-    if (!exportMenuOpen) return;
-    const closeOnOutsideClick = (event: Event) => {
-      if (event.target instanceof Node && !exportMenuRef.current?.contains(event.target)) {
-        setExportMenuOpen(false);
+    const video = videoRef.current;
+    const canvas = livePreviewRef.current;
+    if (!file || !video || !canvas) return;
+    let active = true;
+    let frameId: number | null = null;
+    let renderer: ReturnType<typeof createLivePreview> | null = null;
+    let failed = false;
+    setPreviewMode('loading');
+    setPreviewStatus('');
+    const fallback = (failure: unknown) => {
+      if (!active || failed) return;
+      failed = true;
+      setPreviewMode('fallback');
+      setPreviewStatus(`Using a simpler live preview: ${failure instanceof Error ? failure.message : String(failure)}`);
+    };
+    try {
+      renderer = createLivePreview(canvas);
+    } catch (failure) {
+      fallback(failure);
+    }
+    const draw = () => {
+      if (!active || failed || !renderer) return;
+      try {
+        if (renderer.draw(video, adjustmentsRef.current)) setPreviewMode('gpu');
+      } catch (failure) {
+        fallback(failure);
       }
     };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setExportMenuOpen(false);
+    const observeFrame: VideoFrameRequestCallback = () => {
+      draw();
+      if (active) frameId = video.requestVideoFrameCallback(observeFrame);
     };
-    document.addEventListener('pointerdown', closeOnOutsideClick);
-    document.addEventListener('keydown', closeOnEscape);
+    const contextLost = (event: Event) => {
+      event.preventDefault();
+      fallback(new Error('The graphics context was lost.'));
+    };
+    drawLivePreviewRef.current = draw;
+    video.addEventListener('loadeddata', draw);
+    video.addEventListener('seeked', draw);
+    canvas.addEventListener('webglcontextlost', contextLost);
+    frameId = video.requestVideoFrameCallback(observeFrame);
+    draw();
     return () => {
-      document.removeEventListener('pointerdown', closeOnOutsideClick);
-      document.removeEventListener('keydown', closeOnEscape);
+      active = false;
+      drawLivePreviewRef.current = () => {};
+      if (frameId !== null) video.cancelVideoFrameCallback(frameId);
+      video.removeEventListener('loadeddata', draw);
+      video.removeEventListener('seeked', draw);
+      canvas.removeEventListener('webglcontextlost', contextLost);
+      renderer?.dispose();
     };
-  }, [exportMenuOpen]);
+  }, [file]);
+
+  useEffect(() => {
+    drawLivePreviewRef.current();
+  }, [adjustments]);
 
   useEffect(() => {
     if (!mobileActionsOpen) return;
@@ -287,6 +324,25 @@ export function OnboardEditor() {
       document.removeEventListener('keydown', closeOnEscape);
     };
   }, [mobileActionsOpen]);
+
+  useEffect(() => {
+    if (!brandMenuOpen) return;
+    const closeOnOutsideClick = (event: Event) => {
+      if (event.target instanceof Node && !brandMenuRef.current?.contains(event.target)) setBrandMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setBrandMenuOpen(false);
+        brandButtonRef.current?.focus();
+      }
+    };
+    document.addEventListener('pointerdown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [brandMenuOpen]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -580,7 +636,8 @@ export function OnboardEditor() {
     setError('');
     setRemoteSourceProgress({ fileName: pathName, loaded: 0, total: null });
 
-    void fetchRemoteMp4(sourceUrl, (progress) => {
+    const importSource = isSharedPostUrl(sourceUrl) ? fetchSharedPost : fetchRemoteMp4;
+    void importSource(sourceUrl, (progress) => {
       if (remoteImportController.current === controller) {
         setRemoteSourceProgress({ ...progress, fileName: pathName });
       }
@@ -620,7 +677,7 @@ export function OnboardEditor() {
   function finishRename() {
     if (!file) return;
     const baseName = renameDraft.replace(/\s+/g, '-') || 'video';
-    setMediaName(`${baseName}.${exportFormat}`);
+    setMediaName(`${baseName}.mp4`);
     setHasRenamedMedia(true);
     setIsRenaming(false);
   }
@@ -1198,6 +1255,7 @@ export function OnboardEditor() {
   globalKeyHandlerRef.current = (event) => {
     if (!file || event.altKey) return;
     const activeElement = document.activeElement;
+    if (brandMenuRef.current?.contains(activeElement) || extensionInstructionsRef.current?.open) return;
     const isTextEntry = activeElement instanceof HTMLElement && (
       activeElement.isContentEditable
       || activeElement instanceof HTMLTextAreaElement
@@ -1318,30 +1376,17 @@ export function OnboardEditor() {
         )));
 
         try {
-          const output = job.format === 'gif'
-            ? await exportGifLocally(
-              job.file,
-              job.recipe,
-              job.duration,
-              job.width,
-              job.height,
-              (progress) => updateExportJobs((current) => current.map((item) => (
-                item.id === job.id ? { ...item, progress } : item
-              ))),
-              controller.signal,
-              job.gifSettings,
-            )
-            : await exportMp4Locally(
-              job.file,
-              job.recipe,
-              job.duration,
-              job.width,
-              job.height,
-              (progress) => updateExportJobs((current) => current.map((item) => (
-                item.id === job.id ? { ...item, progress } : item
-              ))),
-              controller.signal,
-            );
+          const output = await exportMp4Locally(
+            job.file,
+            job.recipe,
+            job.duration,
+            job.width,
+            job.height,
+            (progress) => updateExportJobs((current) => current.map((item) => (
+              item.id === job.id ? { ...item, progress } : item
+            ))),
+            controller.signal,
+          );
           if (!controller.signal.aborted) {
             downloadExport(output, job.fileName);
             updateExportJobs((current) => current.flatMap((item) => (
@@ -1365,7 +1410,7 @@ export function OnboardEditor() {
               status: 'error',
               error: controller.signal.aborted
                 ? 'Export cancelled.'
-                : exportError instanceof Error ? exportError.message : `Could not export ${job.format.toUpperCase()}.`,
+                : exportError instanceof Error ? exportError.message : 'Could not export MP4.',
             }];
           }));
         } finally {
@@ -1377,7 +1422,7 @@ export function OnboardEditor() {
     }
   }
 
-  function startExport(format: 'gif' | 'mp4') {
+  function startExport() {
     if (!file || !segments.length || !sourceDimensionsValid) return;
     const recipe = {
       segments: segments.map((segment) => ({ ...segment })),
@@ -1391,9 +1436,8 @@ export function OnboardEditor() {
       setError(preflightError instanceof Error ? preflightError.message : 'Export settings are invalid.');
       return;
     }
-    setExportFormat(format);
     if (hasRenamedMedia) {
-      setMediaName((current) => `${current.replace(/\.[^.]+$/, '')}.${format}`);
+      setMediaName((current) => `${current.replace(/\.[^.]+$/, '')}.mp4`);
     }
     const baseName = mediaName.replace(/\.[^.]+$/, '') || 'onboard';
     const job: ExportJob = {
@@ -1403,9 +1447,7 @@ export function OnboardEditor() {
       duration,
       width: dimensions.width,
       height: dimensions.height,
-      format,
-      gifSettings: { ...gifSettings },
-      fileName: `${baseName}.${format}`,
+      fileName: `${baseName}.mp4`,
       status: 'queued',
       progress: 0,
     };
@@ -1416,16 +1458,23 @@ export function OnboardEditor() {
 
   function saveCurrentLook() {
     const video = videoRef.current;
-    if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
-      setError('Wait for a video frame to load before saving this look.');
+    const canvas = livePreviewRef.current;
+    if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || video.seeking || previewMode === 'loading') {
+      setError('Wait for the current video frame before saving this look.');
       return;
     }
 
     try {
+      drawLivePreviewRef.current();
       const look: SavedLook = {
         id: crypto.randomUUID(),
         time: video.currentTime,
-        thumbnail: createSavedLookThumbnail(video, crop, rotation, adjustments),
+        thumbnail: createSavedLookThumbnail(
+          previewMode === 'gpu' && canvas ? canvas : video,
+          crop,
+          rotation,
+          previewMode === 'fallback' ? `url(#${fallbackFilterId}) saturate(${getColorTransform(adjustments).saturation})` : undefined,
+        ),
         adjustments: { ...adjustments },
       };
       setSavedLooks((current) => [...current, look]);
@@ -1475,13 +1524,12 @@ export function OnboardEditor() {
   }
 
   const rotated = rotation % 180 !== 0;
-  const previewTransferTable = buildPreviewTransferTable(adjustments)
-    .map((value) => (value / 255).toFixed(6))
-    .join(' ');
-  const previewSaturation = Math.max(0, 1 + (adjustments.saturation + adjustments.vibrance * 0.6) / 100);
-  const previewSharpness = Math.min(2, (adjustments.sharpness + adjustments.definition * 0.7) / 100);
-  const previewClarity = adjustments.clarity / 100;
-  const previewFilterId = buildPreviewFilterId(adjustments);
+  const fallbackFilterId = `onboard-live-${ADJUSTMENTS.map(([key]) => adjustments[key]).join('-').replace(/-/g, 'n')}`;
+  const fallbackTransferTable = previewMode === 'fallback'
+    ? buildPreviewTransferTable(adjustments).map((value) => value.toFixed(6)).join(' ')
+    : '';
+  const fallbackSharpness = Math.min(2, (adjustments.sharpness + adjustments.definition * 0.7) / 100);
+  const fallbackClarity = adjustments.clarity / 100;
   const cropScaleX = cropOverlayVisible ? 1 : 1 / crop.width;
   const cropScaleY = cropOverlayVisible ? 1 : 1 / crop.height;
   const orientedAspectRatio = rotated ? dimensions.height / dimensions.width : dimensions.width / dimensions.height;
@@ -1501,13 +1549,15 @@ export function OnboardEditor() {
   }
   const canvasStyle: CSSProperties = {};
   const videoStyle: CSSProperties = {
-    filter: `url(#${previewFilterId}) saturate(${previewSaturation})`,
     width: `${(rotated ? dimensions.width / dimensions.height : 1) * cropScaleX * 100}%`,
     height: `${(rotated ? dimensions.height / dimensions.width : 1) * cropScaleY * 100}%`,
     left: `${(0.5 + videoOffsetX) * 100}%`,
     top: `${(0.5 + videoOffsetY) * 100}%`,
     transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
   };
+  const sourceVideoStyle: CSSProperties = previewMode === 'fallback'
+    ? { ...videoStyle, filter: `url(#${fallbackFilterId}) saturate(${getColorTransform(adjustments).saturation})` }
+    : videoStyle;
   const cropStyle: CSSProperties = {
     left: `${crop.x * 100}%`,
     top: `${crop.y * 100}%`,
@@ -1532,10 +1582,10 @@ export function OnboardEditor() {
     }
   }
   function adjustmentSlider(key: string, label: string) {
-    const min = isIncreaseOnlyAdjustment(key) ? 0 : -100;
+    const { min, max, step } = getAdjustmentRange(key);
     const value = adjustments[key];
-    const zeroPosition = ((0 - min) / (100 - min)) * 100;
-    const valuePosition = ((value - min) / (100 - min)) * 100;
+    const zeroPosition = ((0 - min) / (max - min)) * 100;
+    const valuePosition = ((value - min) / (max - min)) * 100;
     const fillStart = Math.min(zeroPosition, valuePosition);
     const fillEnd = Math.max(zeroPosition, valuePosition);
     const track = `linear-gradient(to right, #505659 0%, #505659 ${fillStart}%, var(--accent) ${fillStart}%, var(--accent) ${fillEnd}%, #505659 ${fillEnd}%, #505659 100%)`;
@@ -1546,8 +1596,8 @@ export function OnboardEditor() {
         type="range"
         aria-label={label}
         min={min}
-        max="100"
-        step="10"
+        max={max}
+        step={step}
         value={value}
         disabled={!file}
         data-adjusted={value !== 0}
@@ -1563,37 +1613,38 @@ export function OnboardEditor() {
       />
     );
   }
-  function renderGifSettingGroup(key: keyof GifExportSettings, label: string) {
-    return (
-      <fieldset className="export-setting-group">
-        <legend>{label}</legend>
-        <div className="export-setting-options" role="group" aria-label={`${label} level`}>
-          {GIF_EXPORT_SETTING_LEVELS.map((level) => (
-            <button
-              type="button"
-              className={`export-setting-option${gifSettings[key] === level ? ' active' : ''}`}
-              aria-pressed={gifSettings[key] === level}
-              key={level}
-              onClick={() => setGifSettings((current) => ({ ...current, [key]: level }))}
-            >
-              <span>{level[0].toUpperCase()}{level.slice(1)}</span>
-              <small>{GIF_EXPORT_SETTING_VALUES[key][level].label}</small>
-            </button>
-          ))}
-        </div>
-      </fieldset>
-    );
-  }
   const [selectedAdjustmentKey, selectedAdjustmentLabel] = ADJUSTMENTS.find(([key]) => key === mobileAdjustment) ?? ADJUSTMENTS[0];
-  const adjustmentMinimum = isIncreaseOnlyAdjustment(selectedAdjustmentKey) ? 0 : -100;
+  const { min: adjustmentMinimum, max: adjustmentMaximum, step: adjustmentStep } = getAdjustmentRange(selectedAdjustmentKey);
   const adjustmentTickValues = Array.from(
-    { length: Math.floor((100 - adjustmentMinimum) / 10) + 1 },
-    (_, index) => adjustmentMinimum + index * 10,
+    { length: Math.floor((adjustmentMaximum - adjustmentMinimum) / adjustmentStep) + 1 },
+    (_, index) => adjustmentMinimum + index * adjustmentStep,
   );
   return (
     <main className="editor-app">
       <header className="onboard-header">
-        <div className="brand-lockup"><span>ONBOARD</span></div>
+        <div className="brand-lockup" ref={brandMenuRef}>
+          <button
+            ref={brandButtonRef}
+            className="brand-toggle"
+            type="button"
+            aria-label="Onboard menu"
+            aria-expanded={brandMenuOpen}
+            aria-controls="brand-menu"
+            onClick={() => setBrandMenuOpen((open) => !open)}
+          >
+            ONBOARD <ChevronDown size={14} aria-hidden="true" />
+          </button>
+          {brandMenuOpen && (
+            <div id="brand-menu" className="brand-menu" role="group" aria-label="Onboard menu">
+              <a href={`${import.meta.env.BASE_URL}onboard-extension.zip`} download="onboard-extension.zip" onClick={() => {
+                setBrandMenuOpen(false);
+                window.setTimeout(() => extensionInstructionsRef.current?.showModal(), 0);
+              }}>
+                Download extension
+              </a>
+            </div>
+          )}
+        </div>
         <div className={`project-title${file ? '' : ' empty-project-title'}`}>
           {isRenaming && file ? (
             <>
@@ -1611,53 +1662,26 @@ export function OnboardEditor() {
                   }
                 }}
               />
-              <span>{hasRenamedMedia ? `.${exportFormat}` : file.name.match(/\.[^.]+$/)?.[0] ?? '.mp4'}</span>
+              <span>{hasRenamedMedia ? '.mp4' : file.name.match(/\.[^.]+$/)?.[0] ?? '.mp4'}</span>
             </>
           ) : file ? (
             <button className="project-name-button" type="button" onClick={beginRename} aria-label={`Rename video ${mediaName}`}>
               {mediaName}
             </button>
           ) : (
-            <span>Untitled {exportFormat.toUpperCase()}</span>
+            <span>Untitled MP4</span>
           )}
         </div>
         <div className="header-export-area">
-          <div className="export-dropdown" ref={exportMenuRef}>
+          <div className="export-dropdown">
             <button
               className="export-button"
               type="button"
-              aria-haspopup="dialog"
-              aria-expanded={exportMenuOpen}
-              aria-controls="desktop-export-menu"
-              onClick={() => setExportMenuOpen((open) => !open)}
+              onClick={startExport}
               disabled={!file || !duration || !sourceDimensionsValid || !segments.length || isStitching}
             >
-              <Download size={15} /> Export <ChevronDown size={15} />
+              <Download size={15} /> Export MP4
             </button>
-            {exportMenuOpen && (
-              <div id="desktop-export-menu" className="export-format-menu" role="dialog" aria-label="Export settings">
-                <div className="export-menu-heading">GIF settings</div>
-                {renderGifSettingGroup('frameRate', 'Frame rate')}
-                {renderGifSettingGroup('resolution', 'Resolution')}
-                {renderGifSettingGroup('colors', 'Palette colors')}
-                <div className="export-menu-divider" role="separator" />
-                {(['gif', 'mp4'] as const).map((format) => (
-                  <button
-                    className="export-format-option export-format-action"
-                    key={format}
-                    type="button"
-                    disabled={!file || !duration || !sourceDimensionsValid || !segments.length || isStitching}
-                    onClick={() => {
-                      startExport(format);
-                      setExportMenuOpen(false);
-                    }}
-                  >
-                    <Download size={14} />
-                    <span>Export {format.toUpperCase()}</span>
-                  </button>
-                ))}
-              </div>
-            )}
           </div>
           <div className="mobile-actions" ref={mobileActionsRef}>
             <button
@@ -1671,11 +1695,11 @@ export function OnboardEditor() {
             </button>
             {mobileActionsOpen && (
               <div className="mobile-action-menu" role="group" aria-label="Editor actions">
-                <button type="button" onClick={() => {
+                <button type="button" disabled={!file || !duration || !sourceDimensionsValid || !segments.length || isStitching} onClick={() => {
                   setMobileActionsOpen(false);
-                  setMobileExportSettingsOpen(true);
+                  startExport();
                 }}>
-                  <Download size={16} aria-hidden="true" /> Export
+                  <Download size={16} aria-hidden="true" /> Export MP4
                 </button>
                 <button type="button" disabled={isStitching} onClick={() => {
                   setMobileActionsOpen(false);
@@ -1703,9 +1727,9 @@ export function OnboardEditor() {
                       <strong>{job.fileName}</strong>
                       <span>
                         {job.status === 'queued'
-                          ? `Queued · ${job.format.toUpperCase()}`
+                          ? 'Queued · MP4'
                           : job.status === 'exporting'
-                            ? `Exporting ${job.format.toUpperCase()}${job.format === 'gif' ? ` · ${describeGifSettings(job.gifSettings)}` : ''} · ${job.progress}%`
+                            ? `Exporting MP4 · ${job.progress}%`
                             : job.status === 'completed'
                               ? `Downloaded · ${formatByteCount(job.outputBytes ?? 0)} (${(job.outputBytes ?? 0).toLocaleString()} bytes)`
                               : job.error}
@@ -1735,42 +1759,20 @@ export function OnboardEditor() {
         </div>
       </header>
 
-      {mobileExportSettingsOpen && (
-        <div className="mobile-export-backdrop" onClick={(event) => {
-          if (event.target === event.currentTarget) setMobileExportSettingsOpen(false);
-        }}>
-          <section className="mobile-export-sheet" role="dialog" aria-modal="true" aria-labelledby="mobile-export-title">
-            <div className="mobile-export-heading">
-              <h2 id="mobile-export-title">Export</h2>
-              <button type="button" aria-label="Close export settings" onClick={() => setMobileExportSettingsOpen(false)}>
-                <X size={18} />
-              </button>
-            </div>
-            <div className="mobile-gif-settings" role="group" aria-label="GIF export settings">
-              <div className="export-menu-heading">GIF settings</div>
-              {renderGifSettingGroup('frameRate', 'Frame rate')}
-              {renderGifSettingGroup('resolution', 'Resolution')}
-              {renderGifSettingGroup('colors', 'Palette colors')}
-            </div>
-            <div className="mobile-export-format-actions" role="group" aria-label="Choose output format to export">
-              {(['gif', 'mp4'] as const).map((format) => (
-                <button
-                  type="button"
-                  className="export-format-action"
-                  key={format}
-                  disabled={!file || !duration || !sourceDimensionsValid || !segments.length || isStitching}
-                  onClick={() => {
-                    startExport(format);
-                    setMobileExportSettingsOpen(false);
-                  }}
-                >
-                  <Download size={14} /> Export {format.toUpperCase()}
-                </button>
-              ))}
-            </div>
-          </section>
+      <dialog className="extension-instructions" ref={extensionInstructionsRef} aria-labelledby="extension-instructions-title" onClose={() => brandButtonRef.current?.focus()}>
+        <div className="extension-instructions-heading">
+          <h2 id="extension-instructions-title">Install the Chrome extension</h2>
+          <button type="button" aria-label="Close instructions" onClick={() => extensionInstructionsRef.current?.close()}>
+            <X size={16} aria-hidden="true" />
+          </button>
         </div>
-      )}
+        <ol>
+          <li>Unzip the downloaded extension and keep the extracted folder in place.</li>
+          <li>In Chrome, enter <code>chrome://extensions</code> in the address bar.</li>
+          <li>Turn on Developer mode, select Load unpacked, and choose the extracted folder containing <code>manifest.json</code>.</li>
+          <li>Open the extension popup, enable the sites you want to import from, and reload Onboard.</li>
+        </ol>
+      </dialog>
 
       <section className="editor-main" aria-label="Video editor" data-mobile-panel={mobilePanel}>
         <input ref={fileInput} className="visually-hidden" type="file" accept="video/mp4,.mp4,video/quicktime,.mov" onChange={chooseVideo} />
@@ -1930,7 +1932,7 @@ export function OnboardEditor() {
                 <input
                   id="source-video-url"
                   type="url"
-                  placeholder="https://example.com/video.mp4"
+                  placeholder="Video or shared post URL"
                   value={remoteSourceUrl}
                   onChange={(event) => setRemoteSourceUrl(event.currentTarget.value)}
                   required
@@ -1939,10 +1941,17 @@ export function OnboardEditor() {
                   {remoteSourceProgress ? 'Loading…' : 'Load URL'}
                 </button>
                 {remoteSourceProgress && (
-                  <span className="source-url-progress" role="status">
-                    Loading {remoteSourceProgress.fileName} · {formatByteCount(remoteSourceProgress.loaded)}
-                    {remoteSourceProgress.total ? ` of ${formatByteCount(remoteSourceProgress.total)}` : ''}
-                  </span>
+                  <>
+                    <span className="source-url-progress" role="status">
+                      Loading {remoteSourceProgress.fileName} · {formatByteCount(remoteSourceProgress.loaded)}
+                      {remoteSourceProgress.total ? ` of ${formatByteCount(remoteSourceProgress.total)}` : ''}
+                    </span>
+                    <button className="tool-button" type="button" onClick={() => {
+                      remoteImportController.current?.abort();
+                      remoteImportController.current = null;
+                      setRemoteSourceProgress(null);
+                    }}>Cancel</button>
+                  </>
                 )}
               </form>
             )}
@@ -1960,38 +1969,22 @@ export function OnboardEditor() {
             }}
             onDrop={dropVideo}
           >
-            <svg className="preview-filter-defs" aria-hidden="true">
-              <filter id={previewFilterId} x="-20%" y="-20%" width="140%" height="140%" colorInterpolationFilters="sRGB">
-                <feComponentTransfer result="color-adjusted">
-                  <feFuncR type="table" tableValues={previewTransferTable} />
-                  <feFuncG type="table" tableValues={previewTransferTable} />
-                  <feFuncB type="table" tableValues={previewTransferTable} />
-                </feComponentTransfer>
-                <feGaussianBlur in="color-adjusted" stdDeviation="1.5" result="sharpness-blur" />
-                <feComposite
-                  in="color-adjusted"
-                  in2="sharpness-blur"
-                  operator="arithmetic"
-                  k1="0"
-                  k2={1 + previewSharpness}
-                  k3={-previewSharpness}
-                  k4="0"
-                  result="sharpened"
-                />
-                <feGaussianBlur in="sharpened" stdDeviation="3.5" result="clarity-blur" />
-                <feComposite
-                  in="sharpened"
-                  in2="clarity-blur"
-                  operator="arithmetic"
-                  k1="0"
-                  k2={1 + previewClarity}
-                  k3={-previewClarity}
-                  k4="0"
-                  result="clarified"
-                />
-                <feGaussianBlur in="clarified" stdDeviation={adjustments.denoise * 0.02} />
-              </filter>
-            </svg>
+            {previewMode === 'fallback' && (
+              <svg className="preview-filter-defs" aria-hidden="true">
+                <filter id={fallbackFilterId} x="-20%" y="-20%" width="140%" height="140%" colorInterpolationFilters="sRGB">
+                  <feComponentTransfer result="color-adjusted">
+                    <feFuncR type="table" tableValues={fallbackTransferTable} />
+                    <feFuncG type="table" tableValues={fallbackTransferTable} />
+                    <feFuncB type="table" tableValues={fallbackTransferTable} />
+                  </feComponentTransfer>
+                  <feGaussianBlur in="color-adjusted" stdDeviation="1.5" result="sharpness-blur" />
+                  <feComposite in="color-adjusted" in2="sharpness-blur" operator="arithmetic" k1="0" k2={1 + fallbackSharpness} k3={-fallbackSharpness} k4="0" result="sharpened" />
+                  <feGaussianBlur in="sharpened" stdDeviation="3.5" result="clarity-blur" />
+                  <feComposite in="sharpened" in2="clarity-blur" operator="arithmetic" k1="0" k2={1 + fallbackClarity} k3={-fallbackClarity} k4="0" result="clarified" />
+                  <feGaussianBlur in="clarified" stdDeviation={adjustments.denoise * 0.02} />
+                </filter>
+              </svg>
+            )}
             {!file ? (
               <div className="dropzone">
                 {remoteSourceProgress ? (
@@ -2034,7 +2027,7 @@ export function OnboardEditor() {
                   ref={videoRef}
                   src={previewUrl || undefined}
                   className="onboard-video"
-                  style={videoStyle}
+                  style={sourceVideoStyle}
                   playsInline
                   preload="auto"
                   tabIndex={0}
@@ -2048,6 +2041,12 @@ export function OnboardEditor() {
                   onPause={onVideoPause}
                   onSeeked={onVideoSeeked}
                   onEnded={onVideoEnded}
+                />
+                <canvas
+                  ref={livePreviewRef}
+                  className="live-preview"
+                  style={{ ...videoStyle, visibility: previewMode === 'gpu' ? 'visible' : 'hidden' }}
+                  aria-hidden="true"
                 />
                 {cropOverlayVisible && (
                   <div className="crop-selection" style={cropStyle} aria-label="Adjust crop by dragging a corner or edge">
@@ -2076,6 +2075,7 @@ export function OnboardEditor() {
                     ))}
                   </div>
                 )}
+                {file && previewStatus && <div className="preview-status" role="status">{previewStatus}</div>}
               </div>
             )}
           </div>
@@ -2104,8 +2104,8 @@ export function OnboardEditor() {
                     key={key}
                     style={{
                       '--adjustment-ring': adjustments[key] < 0
-                        ? `conic-gradient(transparent ${100 + adjustments[key]}%, var(--accent) 0)`
-                        : `conic-gradient(var(--accent) ${adjustments[key]}%, transparent 0)`,
+                        ? `conic-gradient(transparent ${100 - (adjustments[key] / getAdjustmentRange(key).min) * 100}%, var(--accent) 0)`
+                        : `conic-gradient(var(--accent) ${(adjustments[key] / getAdjustmentRange(key).max) * 100}%, transparent 0)`,
                     } as CSSProperties}
                     onClick={() => setMobileAdjustment(key)}
                   >
@@ -2122,9 +2122,9 @@ export function OnboardEditor() {
               <span className="mobile-adjustment-ticks" aria-hidden="true">
                 {adjustmentTickValues.map((value) => (
                   <span
-                    className={value === adjustmentMinimum || value === 0 || value === 100 ? 'major' : ''}
+                    className={value === adjustmentMinimum || value === 0 || value === adjustmentMaximum ? 'major' : ''}
                     key={value}
-                    style={{ left: `${((value - adjustmentMinimum) / (100 - adjustmentMinimum)) * 100}%` }}
+                    style={{ left: `${((value - adjustmentMinimum) / (adjustmentMaximum - adjustmentMinimum)) * 100}%` }}
                   />
                 ))}
               </span>
@@ -2519,44 +2519,22 @@ function createTimelineThumbnail(
 }
 
 function createSavedLookThumbnail(
-  video: HTMLVideoElement,
+  source: HTMLVideoElement | HTMLCanvasElement,
   crop: CropRect,
   rotation: VideoEditRecipe['rotation'],
-  adjustments: Record<string, number>,
+  filter?: string,
 ) {
-  const scale = Math.min(1, 640 / video.videoWidth, 640 / video.videoHeight);
-  const source = document.createElement('canvas');
-  source.width = Math.max(1, Math.round(video.videoWidth * scale));
-  source.height = Math.max(1, Math.round(video.videoHeight * scale));
-  const sourceContext = source.getContext('2d', { willReadFrequently: true });
-  if (!sourceContext) throw new Error('The browser could not create an image preview.');
-  sourceContext.drawImage(video, 0, 0, source.width, source.height);
-
-  const image = sourceContext.getImageData(0, 0, source.width, source.height);
-  const transferTable = buildPreviewTransferTable(adjustments);
-  const saturation = Math.max(0, 1 + (adjustments.saturation + adjustments.vibrance * 0.6) / 100);
-  for (let index = 0; index < image.data.length; index += 4) {
-    const red = transferTable[image.data[index]] / 255;
-    const green = transferTable[image.data[index + 1]] / 255;
-    const blue = transferTable[image.data[index + 2]] / 255;
-    const luminance = red * 0.213 + green * 0.715 + blue * 0.072;
-    image.data[index] = (luminance + (red - luminance) * saturation) * 255;
-    image.data[index + 1] = (luminance + (green - luminance) * saturation) * 255;
-    image.data[index + 2] = (luminance + (blue - luminance) * saturation) * 255;
-  }
-  sourceContext.putImageData(image, 0, 0);
-
+  const width = source instanceof HTMLVideoElement ? source.videoWidth : source.width;
+  const height = source instanceof HTMLVideoElement ? source.videoHeight : source.height;
   const oriented = document.createElement('canvas');
-  oriented.width = rotation % 180 ? source.height : source.width;
-  oriented.height = rotation % 180 ? source.width : source.height;
-  const orientedContext = oriented.getContext('2d');
-  if (!orientedContext) throw new Error('The browser could not create an image preview.');
-  orientedContext.translate(oriented.width / 2, oriented.height / 2);
-  orientedContext.rotate((rotation * Math.PI) / 180);
-  orientedContext.drawImage(source, -source.width / 2, -source.height / 2);
-
-  const cropX = Math.round(crop.x * oriented.width);
-  const cropY = Math.round(crop.y * oriented.height);
+  oriented.width = rotation % 180 ? height : width;
+  oriented.height = rotation % 180 ? width : height;
+  const context = oriented.getContext('2d');
+  if (!context) throw new Error('The browser could not create an image preview.');
+  context.filter = filter ?? 'none';
+  context.translate(oriented.width / 2, oriented.height / 2);
+  context.rotate((rotation * Math.PI) / 180);
+  context.drawImage(source, -width / 2, -height / 2);
   const cropWidth = Math.max(1, Math.round(crop.width * oriented.width));
   const cropHeight = Math.max(1, Math.round(crop.height * oriented.height));
   const thumbnailScale = Math.min(1, 320 / cropWidth, 180 / cropHeight);
@@ -2566,29 +2544,12 @@ function createSavedLookThumbnail(
   const thumbnailContext = thumbnail.getContext('2d');
   if (!thumbnailContext) throw new Error('The browser could not create an image preview.');
   thumbnailContext.imageSmoothingQuality = 'high';
-  thumbnailContext.filter = `blur(${adjustments.denoise * 0.004 * thumbnailScale}px)`;
-  thumbnailContext.drawImage(
-    oriented,
-    cropX,
-    cropY,
-    cropWidth,
-    cropHeight,
-    0,
-    0,
-    thumbnail.width,
-    thumbnail.height,
-  );
+  thumbnailContext.drawImage(oriented, crop.x * oriented.width, crop.y * oriented.height, cropWidth, cropHeight, 0, 0, thumbnail.width, thumbnail.height);
   return thumbnail.toDataURL('image/jpeg', 0.82);
 }
 
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
-}
-
-function describeGifSettings(settings: GifExportSettings) {
-  const profile = getGifEncodingProfile(settings);
-  const resolution = profile.maxDimension ? `max ${profile.maxDimension}px` : 'source resolution';
-  return `${profile.frameRate} fps · ${resolution} · ${profile.maxColors} colors`;
 }
 
 function downloadExport(output: Blob, fileName: string) {

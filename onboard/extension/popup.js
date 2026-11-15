@@ -1,9 +1,14 @@
 import { scanDirectMp4s } from './scanner.js';
+import { SITE_PERMISSIONS } from './resolver.js';
 
-const ONBOARD_URL = 'https://mackledorf.github.io/VaultX/';
+const ONBOARD_URL = 'https://mackledorf.github.io/VaultX/Onboard/';
 const scanButton = document.querySelector('#scan');
 const status = document.querySelector('#status');
 const candidateList = document.querySelector('#candidates');
+const permissionButtons = {
+  x: document.querySelector('#enable-x'),
+  redgifs: document.querySelector('#enable-redgifs'),
+};
 
 function formatDuration(seconds) {
   const minutes = Math.floor(seconds / 60);
@@ -112,4 +117,27 @@ async function scanActivePage() {
 }
 
 scanButton.addEventListener('click', () => void scanActivePage());
+for (const [site, button] of Object.entries(permissionButtons)) {
+  const siteName = site === 'x' ? 'X' : 'Redgifs';
+  void chrome.permissions.contains({ origins: SITE_PERMISSIONS[site] }).then((allowed) => {
+    if (allowed) {
+      button.textContent = `${siteName} imports enabled`;
+      button.disabled = true;
+    }
+  }).catch(() => setStatus('Could not check extension permissions.', 'error'));
+  button.addEventListener('click', async () => {
+    try {
+      const allowed = await chrome.permissions.request({ origins: SITE_PERMISSIONS[site] });
+      if (allowed) {
+        button.textContent = `${siteName} imports enabled`;
+        button.disabled = true;
+        setStatus(`${siteName} imports are enabled.`);
+      } else {
+        setStatus(`${siteName} imports require permission to access its media hosts.`, 'error');
+      }
+    } catch {
+      setStatus(`Could not enable ${siteName} imports.`, 'error');
+    }
+  });
+}
 void scanActivePage();

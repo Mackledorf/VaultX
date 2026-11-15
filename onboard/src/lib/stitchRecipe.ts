@@ -1,4 +1,5 @@
 export type VideoDimensions = { width: number; height: number };
+export type StitchClip = { duration: number; hasAudio: boolean };
 
 export function getStitchOutputDimensions(dimensions: VideoDimensions[]) {
   const largestSource = dimensions.reduce<VideoDimensions | null>((largest, current) => {
@@ -15,18 +16,28 @@ export function getStitchOutputDimensions(dimensions: VideoDimensions[]) {
   };
 }
 
-export function buildStitchFilter(width: number, height: number, inputCount: number) {
+export function buildStitchFilter(width: number, height: number, clips: StitchClip[]) {
   if (
     !Number.isInteger(width) || !Number.isInteger(height) ||
-    width < 2 || height < 2 || inputCount < 2
+    width < 2 || height < 2 || clips.length < 2 ||
+    clips.some((clip) => !Number.isFinite(clip.duration) || clip.duration <= 0)
   ) {
     throw new Error('Stitch dimensions and source count are invalid.');
   }
 
-  const clipFilters = Array.from({ length: inputCount }, (_, index) => (
+  const clipFilters = clips.map((_clip, index) => (
     `[${index}:v:0]setpts=PTS-STARTPTS,scale=${width}:${height}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[v${index}]`
   ));
-  const inputs = Array.from({ length: inputCount }, (_, index) => `[v${index}]`).join('');
-  clipFilters.push(`${inputs}concat=n=${inputCount}:v=1:a=0[outv]`);
+  const hasAudio = clips.some((clip) => clip.hasAudio);
+  if (hasAudio) {
+    clips.forEach((clip, index) => {
+      const input = clip.hasAudio
+        ? `[${index}:a:0]aresample=48000:async=1:first_pts=0,aformat=sample_rates=48000:channel_layouts=stereo,apad`
+        : 'anullsrc=channel_layout=stereo:sample_rate=48000';
+      clipFilters.push(`${input},atrim=duration=${clip.duration},asetpts=PTS-STARTPTS[a${index}]`);
+    });
+  }
+  const inputs = clips.map((_clip, index) => `[v${index}]${hasAudio ? `[a${index}]` : ''}`).join('');
+  clipFilters.push(`${inputs}concat=n=${clips.length}:v=1:a=${hasAudio ? 1 : 0}[outv]${hasAudio ? '[outa]' : ''}`);
   return clipFilters.join(';');
 }

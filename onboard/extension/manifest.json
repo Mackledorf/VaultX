@@ -1,9 +1,27 @@
 {
   "manifest_version": 3,
   "name": "Onboard Video Source",
-  "version": "0.1.0",
-  "description": "Find direct MP4 sources on the active page and open them in Onboard.",
+  "version": "0.2.0",
+  "description": "Find video sources and import supported public posts into Onboard.",
   "permissions": ["activeTab", "scripting"],
+  "optional_host_permissions": [
+    "https://cdn.syndication.twimg.com/*",
+    "https://video.twimg.com/*",
+    "https://api.redgifs.com/*",
+    "https://media.redgifs.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [{
+    "matches": [
+      "https://mackledorf.github.io/VaultX/Onboard/*",
+      "http://127.0.0.1/*",
+      "http://localhost/*"
+    ],
+    "js": ["bridge.js"]
+  }],
   "action": {
     "default_title": "Find MP4s for Onboard",
     "default_popup": "popup.html"

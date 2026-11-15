@@ -3,35 +3,10 @@ import { fetchFile } from '@ffmpeg/util';
 import coreURL from '@ffmpeg/core?url';
 import wasmURL from '@ffmpeg/core/wasm?url';
 import type { VideoEditRecipe } from '../types';
-import { buildGifFilter, buildMp4Filter, preflightExport } from './recipe';
+import { buildMp4Filter, preflightExport } from './recipe';
 import { describeFfmpegFailure } from './exportDiagnostics';
-import { DEFAULT_GIF_EXPORT_SETTINGS, getGifEncodingProfile, type GifExportSettings } from './exportSizing';
+import { videoHasAudio } from './mediaProbe';
 import { getVideoContainerExtension } from './videoSource';
-
-export async function exportGif(
-  file: File,
-  recipe: VideoEditRecipe,
-  sourceDuration: number,
-  sourceWidth: number,
-  sourceHeight: number,
-  onProgress: (progress: number) => void,
-  signal: AbortSignal,
-  settings: GifExportSettings = DEFAULT_GIF_EXPORT_SETTINGS,
-) {
-  const blob = await exportWithFfmpeg(
-    file,
-    recipe,
-    sourceDuration,
-    sourceWidth,
-    sourceHeight,
-    onProgress,
-    signal,
-    'gif',
-    settings,
-  );
-  if (blob.type !== 'image/gif') throw new Error('GIF export returned an invalid file.');
-  return blob;
-}
 
 export async function exportMp4(
   file: File,
@@ -50,8 +25,6 @@ export async function exportMp4(
     sourceHeight,
     onProgress,
     signal,
-    'mp4',
-    undefined,
   );
   if (blob.type !== 'video/mp4') throw new Error('MP4 export returned an invalid file.');
   return blob;
@@ -65,14 +38,12 @@ async function exportWithFfmpeg(
   sourceHeight: number,
   onProgress: (progress: number) => void,
   signal: AbortSignal,
-  format: 'gif' | 'mp4',
-  gifSettings: GifExportSettings | undefined,
 ) {
   if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
   const normalizedRecipe = preflightExport(recipe, sourceDuration, sourceWidth, sourceHeight);
   const ffmpeg = new FFmpeg();
   const inputPath = `source-${crypto.randomUUID()}${getVideoContainerExtension(file)}`;
-  const outputPath = `export-${crypto.randomUUID()}.${format}`;
+  const outputPath = `export-${crypto.randomUUID()}.mp4`;
   const onAbort = () => ffmpeg.terminate();
   const onFfmpegProgress = ({ progress }: { progress: number }) => {
     if (!Number.isFinite(progress)) return;
@@ -110,24 +81,13 @@ async function exportWithFfmpeg(
     if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
     onProgress(5);
 
-    const args = format === 'gif'
-      ? [
+    const hasAudio = await videoHasAudio(ffmpeg, inputPath);
+    if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
+    const args = [
         '-i', inputPath,
-        '-filter_complex', buildGifFilter(
-          normalizedRecipe,
-          getGifEncodingProfile(gifSettings ?? DEFAULT_GIF_EXPORT_SETTINGS),
-        ),
+        '-filter_complex', buildMp4Filter(normalizedRecipe, hasAudio),
         '-map', '[out]',
-        '-an',
-        '-loop', '0',
-        '-f', 'gif',
-        outputPath,
-      ]
-      : [
-        '-i', inputPath,
-        '-filter_complex', buildMp4Filter(normalizedRecipe),
-        '-map', '[out]',
-        '-an',
+        ...(hasAudio ? ['-map', '[aout]', '-c:a', 'aac', '-b:a', '128k'] : ['-an']),
         '-c:v', 'libx264',
         '-preset', 'superfast',
         '-crf', '23',
@@ -135,7 +95,7 @@ async function exportWithFfmpeg(
         '-movflags', '+faststart',
         '-f', 'mp4',
         outputPath,
-      ];
+    ];
     let exitCode: number;
     try {
       exitCode = await ffmpeg.exec(args, 10 * 60 * 1000);
@@ -145,10 +105,10 @@ async function exportWithFfmpeg(
       if (/timeout|time limit/i.test(errorMessage)) {
         throw new Error(`Export timed out after 10 minutes. The browser could not finish processing this video within the encoder's execution limit.`);
       }
-      throw new Error(describeFfmpegFailure(format, null, ffmpegLogs, errorMessage));
+      throw new Error(describeFfmpegFailure('mp4', null, ffmpegLogs, errorMessage));
     }
     if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
-    if (exitCode !== 0) throw new Error(describeFfmpegFailure(format, exitCode, ffmpegLogs));
+    if (exitCode !== 0) throw new Error(describeFfmpegFailure('mp4', exitCode, ffmpegLogs));
 
     let output: Uint8Array | string;
     try {
@@ -158,19 +118,15 @@ async function exportWithFfmpeg(
       throw new Error(`FFmpeg finished encoding but the browser could not read the exported file. Details: ${message}`);
     }
     if (typeof output === 'string' || output.byteLength === 0) {
-      throw new Error(`${format.toUpperCase()} export produced no output.`);
+      throw new Error('MP4 export produced no output.');
     }
-    if (format === 'gif') {
-      if (String.fromCharCode(...output.subarray(0, 3)) !== 'GIF' || output[output.byteLength - 1] !== 0x3b) {
-        throw new Error('GIF export returned an invalid file.');
-      }
-    } else if (output.byteLength < 12 || String.fromCharCode(...output.subarray(4, 8)) !== 'ftyp') {
+    if (output.byteLength < 12 || String.fromCharCode(...output.subarray(4, 8)) !== 'ftyp') {
       throw new Error('MP4 export returned an invalid file.');
     }
     onProgress(100);
     const bytes = new Uint8Array(output.byteLength);
     bytes.set(output);
-    return new Blob([bytes], { type: format === 'gif' ? 'image/gif' : 'video/mp4' });
+    return new Blob([bytes], { type: 'video/mp4' });
   } finally {
     signal.removeEventListener('abort', onAbort);
     ffmpeg.off('progress', onFfmpegProgress);

@@ -1,12 +1,20 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { getPlaybackTransition } from './playback';
+import { getPlaybackTransition, sourceTimeToEditedTime } from './playback';
 
 const segments = [
   { startTime: 0, endTime: 2, playbackRate: 1 },
   { startTime: 2, endTime: 4, playbackRate: 1.5 },
   { startTime: 6, endTime: 8, playbackRate: 0.8 },
 ];
+
+test('maps source positions to the encoded preview timeline across cuts and speeds', () => {
+  assert.equal(sourceTimeToEditedTime(1, segments), 1);
+  assert.equal(sourceTimeToEditedTime(3.5, segments), 3);
+  assert.equal(sourceTimeToEditedTime(5, segments), null);
+  assert.ok(Math.abs((sourceTimeToEditedTime(7, segments) ?? 0) - (2 + 2 / 1.5 + 1 / 0.8)) < 1e-10);
+  assert.equal(sourceTimeToEditedTime(8, segments), null);
+});
 
 test('does not transition until the next source frame reaches the segment end', () => {
   assert.deepEqual(getPlaybackTransition(1.95, 1 / 30, segments), {

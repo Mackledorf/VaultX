@@ -18,9 +18,15 @@ const ADJUSTMENT_NAMES = [
   'denoise',
 ] as const;
 const INCREASE_ONLY_ADJUSTMENTS = new Set(['sharpness', 'definition', 'clarity', 'denoise']);
+const LIGHTING_ADJUSTMENTS = new Set(['exposure', 'brilliance', 'highlights', 'shadows', 'contrast', 'brightness']);
 
 export function isIncreaseOnlyAdjustment(name: string) {
   return INCREASE_ONLY_ADJUSTMENTS.has(name);
+}
+
+export function getAdjustmentRange(name: string) {
+  if (LIGHTING_ADJUSTMENTS.has(name)) return { min: -50, max: 50, step: 5 };
+  return { min: isIncreaseOnlyAdjustment(name) ? 0 : -100, max: 100, step: 10 };
 }
 
 export function normalizeEditRecipe(value: unknown, sourceDuration: number): VideoEditRecipe {
@@ -131,37 +137,23 @@ export function getEditedDuration(segments: VideoEditRecipe['segments']) {
   );
 }
 
-export function buildGifFilter(
-  recipe: VideoEditRecipe,
-  options: { frameRate?: number; maxDimension?: number; maxColors?: number; dither?: string } = {},
-) {
-  const segmentFilters = buildVideoSegmentFilters(recipe, options.frameRate ?? 15, options.maxDimension);
-  segmentFilters.push('[joined]split[gifsrc][palettesrc]');
-  const maxColors = options.maxColors === undefined ? '' : `:max_colors=${options.maxColors}`;
-  segmentFilters.push(`[palettesrc]palettegen=stats_mode=diff${maxColors}[palette]`);
-  segmentFilters.push(`[gifsrc][palette]paletteuse=dither=${options.dither ?? 'sierra2_4a'}[out]`);
-  return segmentFilters.join(';');
+export function buildMp4Filter(recipe: VideoEditRecipe, hasAudio = false) {
+  const filters = buildVideoSegmentFilters(recipe);
+  filters.push('[joined]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[out]');
+  if (hasAudio) {
+    recipe.segments.forEach((segment, index) => {
+      const duration = (segment.endTime - segment.startTime) / segment.playbackRate;
+      filters.push(
+        `[0:a:0]aresample=48000:async=1:first_pts=0,atrim=start=${segment.startTime}:end=${segment.endTime},asetpts=PTS-STARTPTS,atempo=${segment.playbackRate},apad,atrim=duration=${duration}[audio${index}]`,
+      );
+    });
+    const inputs = recipe.segments.map((_segment, index) => `[audio${index}]`).join('');
+    filters.push(`${inputs}concat=n=${recipe.segments.length}:v=0:a=1[aout]`);
+  }
+  return filters.join(';');
 }
 
-export function buildMp4Filter(recipe: VideoEditRecipe) {
-  return `${buildVideoSegmentFilters(recipe, 30).join(';')};[joined]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[out]`;
-}
-
-export function buildPreviewTransferTable(adjustments: Record<string, number>) {
-  const transform = getColorTransform(adjustments);
-  return Array.from({ length: 256 }, (_, value) => applyColorTransform(value / 255, transform) * 255);
-}
-
-export function buildPreviewFilterId(adjustments: Record<string, number>) {
-  const adjustmentKey = ADJUSTMENT_NAMES.map((name) => {
-    const value = Number(adjustments[name] ?? 0);
-    const token = Math.abs(Math.round(value * 1000)).toString(36);
-    return `${value < 0 ? 'n' : 'p'}${token}`;
-  }).join('-');
-  return `onboard-adjustments-${adjustmentKey}`;
-}
-
-function buildVideoSegmentFilters(recipe: VideoEditRecipe, frameRate: number, maxDimension?: number) {
+function buildVideoSegmentFilters(recipe: VideoEditRecipe) {
   const { crop, adjustments, rotation } = recipe;
   const transform = getColorTransform(adjustments);
   const unsharpAmount = (adjustments.sharpness + adjustments.definition * 0.7) / 100;
@@ -196,18 +188,13 @@ function buildVideoSegmentFilters(recipe: VideoEditRecipe, frameRate: number, ma
     const temporalChroma = (denoiseAmount * 0.05).toFixed(2);
     temporalFilters.push(`hqdn3d=${spatialLuma}:${spatialChroma}:${temporalLuma}:${temporalChroma}`);
   }
-  const scaleFilters = maxDimension
-    ? [`scale=w='min(iw,${maxDimension})':h='min(ih,${maxDimension})':force_original_aspect_ratio=decrease:force_divisible_by=2`]
-    : [];
-  const frameReductionFilters = maxDimension
-    ? [`fps=${frameRate}`, ...scaleFilters, ...temporalFilters]
-    : [...temporalFilters, `fps=${frameRate}`];
   const segmentFilters = recipe.segments.map((segment, index) => (
     `[0:v]${[
       `trim=start=${segment.startTime}:end=${segment.endTime}`,
       `setpts=(PTS-STARTPTS)/${segment.playbackRate}`,
       ...spatialFilters,
-      ...frameReductionFilters,
+      ...temporalFilters,
+      'fps=30',
       ...frameFilters,
     ].join(',')}[segment${index}]`
   ));
@@ -218,7 +205,7 @@ function buildVideoSegmentFilters(recipe: VideoEditRecipe, frameRate: number, ma
 
 type ColorTransform = ReturnType<typeof getColorTransform>;
 
-function getColorTransform(adjustments: Record<string, number>) {
+export function getColorTransform(adjustments: Record<string, number>) {
   const brightness = clamp((adjustments.brightness + adjustments.exposure * 0.35) / 100, -1, 1);
   const contrast = Math.max(0.1, 1 + adjustments.contrast / 100);
   const gamma = 2 ** (adjustments.exposure / 100);
@@ -241,18 +228,21 @@ function getColorTransform(adjustments: Record<string, number>) {
   };
 }
 
-function applyColorTransform(value: number, transform: ColorTransform) {
-  const adjusted = clamp((value - 0.5) * transform.contrast + 0.5 + transform.brightness, 0, 1);
-  const gammaAdjusted = Math.pow(adjusted, 1 / transform.gamma);
-  const points = transform.curvePoints;
-  for (let index = 0; index < points.length - 1; index += 1) {
-    const [startX, startY] = points[index];
-    const [endX, endY] = points[index + 1];
-    if (gammaAdjusted <= endX) {
-      return startY + ((gammaAdjusted - startX) / (endX - startX)) * (endY - startY);
+export function buildPreviewTransferTable(adjustments: Record<string, number>) {
+  const transform = getColorTransform(adjustments);
+  return Array.from({ length: 256 }, (_, value) => {
+    const adjusted = clamp((value / 255 - 0.5) * transform.contrast + 0.5 + transform.brightness, 0, 1);
+    const gammaAdjusted = adjusted ** (1 / transform.gamma);
+    const points = transform.curvePoints;
+    for (let index = 0; index < points.length - 1; index += 1) {
+      const [startX, startY] = points[index];
+      const [endX, endY] = points[index + 1];
+      if (gammaAdjusted <= endX) {
+        return startY + ((gammaAdjusted - startX) / (endX - startX)) * (endY - startY);
+      }
     }
-  }
-  return 1;
+    return 1;
+  });
 }
 
 function buildColorTransformExpression(transform: ColorTransform) {

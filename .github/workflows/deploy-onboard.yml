@@ -1,9 +1,17 @@
-name: Deploy Onboard
+name: Deploy VaultX and Onboard
 
 on:
   push:
     branches: [main]
     paths:
+      - "src/**"
+      - "public/**"
+      - "tests/**"
+      - "index.html"
+      - "package.json"
+      - "package-lock.json"
+      - "vite.config.ts"
+      - "tsconfig*.json"
       - "onboard/**"
       - ".github/workflows/deploy-onboard.yml"
   workflow_dispatch:
@@ -14,7 +22,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: onboard-pages
+  group: vaultx-pages
   cancel-in-progress: true
 
 jobs:
@@ -29,7 +37,20 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: onboard/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            onboard/package-lock.json
+
+      - name: Install VaultX dependencies
+        run: npm ci
+
+      - name: Test VaultX
+        run: npm test
+
+      - name: Build VaultX
+        run: npm run build
+        env:
+          VAULTX_BASE_PATH: /VaultX/
 
       - name: Install Onboard dependencies
         run: npm ci
@@ -43,15 +64,21 @@ jobs:
         run: npm run build
         working-directory: onboard
         env:
-          ONBOARD_BASE_PATH: /VaultX/
+          ONBOARD_BASE_PATH: /VaultX/Onboard/
+
+      - name: Assemble GitHub Pages site
+        run: |
+          mkdir -p pages/Onboard
+          cp -R dist/. pages/
+          cp -R onboard/dist/. pages/Onboard/
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v4
 
-      - name: Upload Onboard site
+      - name: Upload VaultX and Onboard site
         uses: actions/upload-pages-artifact@v3
         with:
-          path: onboard/dist
+          path: pages
 
   deploy:
     if: github.ref == 'refs/heads/main'
@@ -61,6 +88,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Deploy Onboard to GitHub Pages
+      - name: Deploy VaultX and Onboard to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4

@@ -31,9 +31,9 @@ npm run dev
 
 For a Windows test after the changes are pushed, clone the repository, run the commands above in PowerShell, and open the localhost URL printed by Vite in current Chrome or Edge. Test with a disposable vault and copies of sample files, not irreplaceable originals. Grant folder read/write access when prompted; inspect the folder and `vaultx.json` in Explorer after importing, editing keywords, moving, refreshing, and reopening. See the [Windows test checklist](LOCAL-VAULT.md#windows-test-checklist).
 
-The application is a static frontend; it needs no media server, account, password, or server configuration. It can be served over HTTPS as static files. This repository's existing GitHub Pages deployment is for Onboard, not VaultX; pushing these changes alone does not publish a VaultX testing site.
+The application is a static frontend; it needs no media server, account, password, or server configuration. It can be served over HTTPS as static files. The GitHub Pages workflow builds both apps into one site: VaultX is published at the repository root, and Onboard is published under `/Onboard/`.
 
-Onboard is a separate browser-based MP4-to-GIF editor with its own app, dependencies, assets, build, and deployment workflow. After its first GitHub Pages deployment, [open Onboard](https://mackledorf.github.io/VaultX/) directly, or see the standalone [Onboard project](./onboard/) and [Onboard README](./onboard/README.md).
+Open [VaultX](https://mackledorf.github.io/VaultX/) or [Onboard](https://mackledorf.github.io/VaultX/Onboard/) after the combined Pages deployment completes. Onboard remains a separate browser-based MP4-to-GIF editor with its own app, dependencies, and assets; see the standalone [Onboard project](./onboard/) and [Onboard README](./onboard/README.md).
 
 ## Tests and build
 

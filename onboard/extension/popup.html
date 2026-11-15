@@ -13,9 +13,13 @@
         <h1>Video sources</h1>
       </header>
       <button id="scan" class="scan-button" type="button">Scan this page</button>
+      <div class="permissions">
+        <button id="enable-x" class="permission-button" type="button">Enable X imports</button>
+        <button id="enable-redgifs" class="permission-button" type="button">Enable Redgifs imports</button>
+      </div>
       <p id="status" class="status" role="status" aria-live="polite">Scanning active page…</p>
       <ol id="candidates" class="candidate-list" aria-label="Detected MP4 sources"></ol>
-      <footer>Direct MP4s only. The source opens in Onboard; sites that block cross-origin reads may need the file picker.</footer>
+      <footer>Enable a site to import its public post URLs in Onboard. Page scanning finds direct MP4s only.</footer>
     </main>
     <script type="module" src="popup.js"></script>
   </body>

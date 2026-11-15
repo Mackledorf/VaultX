@@ -2,7 +2,45 @@
 
 This log records product and interface iterations so prior decisions can be understood and individual changes can be reviewed or restored without undoing unrelated work. For older milestones, exact dates were not recorded.
 
+## 2026-11-15
+
+### Streamlined extension setup
+
+- Open the Chrome installation instructions automatically when the extension download starts, instead of offering a separate menu item.
+- Rationale: put setup guidance directly in the download flow.
+
+### Added extension download and setup
+
+- Added an Onboard wordmark menu with an extension ZIP download and in-editor Chrome installation instructions.
+- Generate the ZIP from the current extension source during development and production builds so the downloaded package stays in sync.
+- Rationale: make the optional extension and its setup discoverable without leaving the editor.
+
+### Added local shared-post imports
+
+- Extended the optional Chrome extension to resolve supported public X and Redgifs post URLs, request site permissions separately, and transfer MP4 bytes directly into the browser editor with progress and cancellation.
+- Kept direct CORS-enabled MP4 imports and local file selection unchanged; private posts, protected streams, and unsupported provider responses report errors rather than using a server or third-party downloader.
+- Rationale: shorten the path from a shared post to an editable local video without retaining or uploading the source.
+
+### Restored live adjustment previews
+
+- Replaced automatic full-video preview encoding with frame-by-frame GPU processing and an explicitly reported simpler fallback. The source video remains the playback and audio authority.
+- Removed the optional export-frame reference renderer from the preview; its output did not look meaningfully different from the live preview.
+- Rationale: keep editing responsive and reduce preview UI that did not provide a useful visual distinction.
+
 ## 2026-11-14
+
+### Switched to MP4 export with an encoded preview
+
+- Replaced GIF export with H.264 MP4 export and preserved source audio through section trims, speed changes, and stitching, including silence for audio-free stitched clips.
+- Rendered the edited preview with the export encoder to match the finished video, with status and errors while rendering or other processing is underway.
+- Narrowed Exposure through Brightness to -50 through +50 in steps of 5 for finer lighting adjustments.
+- Rationale: avoid GIF's large downloads, preserve audio, and show the actual export's adjustments rather than an approximate preview.
+
+### Published VaultX at the root and Onboard under its own path
+
+- Updated the GitHub Pages workflow to test/build both apps and combine them into one Pages artifact, publishing VaultX at `/VaultX/` and Onboard at `/VaultX/Onboard/`.
+- Configured each Vite build with its corresponding Pages base path and updated the Onboard extension and project links.
+- Rationale: provide distinct entry points for the two apps while keeping one repository and Pages deployment.
 
 ### Restored live adjustment previews and expanded GIF export choices
 
