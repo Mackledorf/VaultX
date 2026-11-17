@@ -6,8 +6,9 @@ import { getPlaybackTransition } from '../lib/playback';
 import { buildPreviewTransferTable, getAdjustmentRange, getColorTransform, getEditedDuration, isTimeInSegments, preflightExport, validateSourceDimensions } from '../lib/recipe';
 import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
 import { fetchSharedPost, isSharedPostUrl } from '../lib/sharedSource';
+import { convertGifToMp4 } from '../lib/sourcePreparation';
 import { stitchVideos } from '../lib/stitch';
-import { isSupportedVideoFile } from '../lib/videoSource';
+import { isGifFile, isSupportedVideoFile } from '../lib/videoSource';
 import type { VideoEditRecipe } from '../types';
 
 const MIN_CROP_SIZE = 0.05;
@@ -103,6 +104,7 @@ export function OnboardEditor() {
   const extensionInstructionsRef = useRef<HTMLDialogElement>(null);
   const remoteImportController = useRef<AbortController | null>(null);
   const stitchController = useRef<AbortController | null>(null);
+  const gifPreparationController = useRef<AbortController | null>(null);
   const dragRef = useRef<{
     handle: CropHandle;
     crop: CropRect;
@@ -183,6 +185,7 @@ export function OnboardEditor() {
   const [showRemoteSourceInput, setShowRemoteSourceInput] = useState(false);
   const [isStitching, setIsStitching] = useState(false);
   const [stitchProgress, setStitchProgress] = useState<number | null>(null);
+  const [gifImportProgress, setGifImportProgress] = useState<{ fileName: string; progress: number } | null>(null);
   const editedDuration = getEditedDuration(segments);
   const hasPendingExports = exportJobs.some((job) => job.status === 'queued' || job.status === 'exporting');
 
@@ -235,6 +238,7 @@ export function OnboardEditor() {
   useEffect(() => () => {
     exportControllers.current.forEach((controller) => controller.abort());
     stitchController.current?.abort();
+    gifPreparationController.current?.abort();
     exportCompletionTimeouts.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
   }, []);
 
@@ -426,16 +430,59 @@ export function OnboardEditor() {
   function chooseVideo(event: ChangeEvent<HTMLInputElement>) {
     const nextFile = event.currentTarget.files?.[0];
     event.currentTarget.value = '';
+    if (isStitching || gifPreparationController.current) {
+      setError('Wait for the current source operation to finish before loading another source.');
+      return;
+    }
     remoteImportController.current?.abort();
     remoteImportController.current = null;
     setRemoteSourceProgress(null);
-    loadVideo(nextFile);
+    importLocalSource(nextFile);
+  }
+
+  function importLocalSource(nextFile?: File) {
+    if (!nextFile) return;
+    if (!isSupportedVideoFile(nextFile)) {
+      setError('Choose an MP4, MOV, WEBM, or GIF file.');
+      return;
+    }
+    if (!isGifFile(nextFile)) {
+      loadVideo(nextFile);
+      return;
+    }
+
+    const controller = new AbortController();
+    gifPreparationController.current = controller;
+    setError('');
+    setGifImportProgress({ fileName: nextFile.name, progress: 0 });
+    void convertGifToMp4(nextFile, (progress) => {
+      if (gifPreparationController.current === controller) {
+        setGifImportProgress({ fileName: nextFile.name, progress });
+      }
+    }, controller.signal)
+      .then((preparedFile) => {
+        if (controller.signal.aborted) return;
+        loadVideo(preparedFile, nextFile.name);
+      })
+      .catch((preparationError: unknown) => {
+        if (!controller.signal.aborted) {
+          setError(preparationError instanceof Error ? preparationError.message : 'Could not prepare this GIF for editing.');
+        }
+      })
+      .finally(() => {
+        if (gifPreparationController.current === controller) gifPreparationController.current = null;
+        setGifImportProgress(null);
+      });
   }
 
   function chooseVideosToStitch(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.currentTarget.files ?? []);
     event.currentTarget.value = '';
     if (!files.length) return;
+    if (gifPreparationController.current) {
+      setError('Wait for the current source operation to finish before stitching videos.');
+      return;
+    }
     if (files.length < 2) {
       setError('Select at least two videos to stitch.');
       return;
@@ -584,7 +631,7 @@ export function OnboardEditor() {
     scheduleTrimPreviewRestore(restoreTime);
   }
 
-  function loadVideo(nextFile?: File) {
+  function loadVideo(nextFile?: File, sourceName = nextFile?.name ?? '') {
     clearTrimPreview();
     undoHistoryRef.current = [];
     redoHistoryRef.current = [];
@@ -600,13 +647,13 @@ export function OnboardEditor() {
     setSourceDimensionsValid(false);
     setActiveSavedLookId(null);
     if (!nextFile) return;
-    if (!isSupportedVideoFile(nextFile)) {
-      setError('Choose an MP4 or MOV video. HEVC playback depends on browser codec support.');
+    if (!isSupportedVideoFile(nextFile) || isGifFile(nextFile)) {
+      setError('Choose an MP4, MOV, or WEBM video. WEBM playback depends on browser codec support.');
       return;
     }
     initialFrameReadyRef.current = false;
     setFile(nextFile);
-    setMediaName(nextFile.name);
+    setMediaName(sourceName);
     setHasRenamedMedia(false);
     setIsRenaming(false);
     frameDurationRef.current = DEFAULT_FRAME_DURATION;
@@ -617,8 +664,8 @@ export function OnboardEditor() {
   }
 
   function importRemoteSource(value: string) {
-    if (isStitching) {
-      setError('Wait for the current stitching operation to finish before loading another source.');
+    if (isStitching || gifPreparationController.current) {
+      setError('Wait for the current source operation to finish before loading another source.');
       return;
     }
     let sourceUrl: URL;
@@ -723,14 +770,14 @@ export function OnboardEditor() {
   function dropVideo(event: ReactDragEvent<HTMLDivElement>) {
     event.preventDefault();
     setIsDraggingFile(false);
-    if (isStitching) {
-      setError('Wait for the current stitching operation to finish before loading another source.');
+    if (isStitching || gifPreparationController.current) {
+      setError('Wait for the current source operation to finish before loading another source.');
       return;
     }
     remoteImportController.current?.abort();
     remoteImportController.current = null;
     setRemoteSourceProgress(null);
-    loadVideo(event.dataTransfer.files[0]);
+    importLocalSource(event.dataTransfer.files[0]);
   }
 
   function onMetadata() {
@@ -754,7 +801,7 @@ export function OnboardEditor() {
   }
 
   function onVideoLoadError() {
-    setError('The browser could not load or decode this video. HEVC/H.265 support varies by browser and device; try an H.264-encoded MP4.');
+    setError('The browser could not load or decode this video source. Its codec may not be supported by this browser or device; try an H.264-encoded MP4.');
   }
 
   function onVideoDataReady() {
@@ -1662,7 +1709,7 @@ export function OnboardEditor() {
                   }
                 }}
               />
-              <span>{hasRenamedMedia ? '.mp4' : file.name.match(/\.[^.]+$/)?.[0] ?? '.mp4'}</span>
+              <span>{hasRenamedMedia ? '.mp4' : mediaName.match(/\.[^.]+$/)?.[0] ?? '.mp4'}</span>
             </>
           ) : file ? (
             <button className="project-name-button" type="button" onClick={beginRename} aria-label={`Rename video ${mediaName}`}>
@@ -1701,14 +1748,14 @@ export function OnboardEditor() {
                 }}>
                   <Download size={16} aria-hidden="true" /> Export MP4
                 </button>
-                <button type="button" disabled={isStitching} onClick={() => {
+                <button type="button" disabled={isStitching || gifImportProgress !== null} onClick={() => {
                   setMobileActionsOpen(false);
                   setMobilePanel('video');
                   fileInput.current?.click();
                 }}>
                   <Upload size={16} aria-hidden="true" /> Source
                 </button>
-                <button type="button" disabled={isStitching || hasPendingExports} onClick={() => {
+                <button type="button" disabled={isStitching || gifImportProgress !== null || hasPendingExports} onClick={() => {
                   setMobileActionsOpen(false);
                   setMobilePanel('video');
                   stitchInput.current?.click();
@@ -1775,7 +1822,7 @@ export function OnboardEditor() {
       </dialog>
 
       <section className="editor-main" aria-label="Video editor" data-mobile-panel={mobilePanel}>
-        <input ref={fileInput} className="visually-hidden" type="file" accept="video/mp4,.mp4,video/quicktime,.mov" onChange={chooseVideo} />
+        <input ref={fileInput} className="visually-hidden" type="file" accept="video/mp4,.mp4,video/quicktime,.mov,video/webm,.webm,image/gif,.gif" onChange={chooseVideo} />
         <input ref={stitchInput} className="visually-hidden" type="file" accept="video/mp4,.mp4,video/quicktime,.mov" multiple onChange={chooseVideosToStitch} />
         <aside id="mobile-panel-tools" className="tool-panel transform-panel" aria-label="Video editing controls">
           <section className="tool-section rotation-section">
@@ -1878,7 +1925,7 @@ export function OnboardEditor() {
                 type="button"
                 aria-label={file ? 'Replace source video' : 'Choose source video'}
                 title={file ? 'Replace source video' : 'Choose source video'}
-                disabled={isStitching}
+                disabled={isStitching || gifImportProgress !== null}
                 onClick={() => fileInput.current?.click()}
               >
                 <Upload size={15} />
@@ -1887,7 +1934,7 @@ export function OnboardEditor() {
                 className="source-icon-button source-url-toggle"
                 type="button"
                 aria-label="Load video from URL"
-                disabled={isStitching}
+                disabled={isStitching || gifImportProgress !== null}
                 aria-expanded={showRemoteSourceInput}
                 title="Load video from URL"
                 onClick={() => setShowRemoteSourceInput((visible) => !visible)}
@@ -1899,7 +1946,7 @@ export function OnboardEditor() {
                 type="button"
                 aria-label="Stitch multiple videos"
                 title={isStitching ? 'Stitching videos' : hasPendingExports ? 'Wait for queued exports to finish before stitching' : 'Stitch videos and replace the current source'}
-                disabled={isStitching || hasPendingExports}
+                disabled={isStitching || gifImportProgress !== null || hasPendingExports}
                 onClick={() => stitchInput.current?.click()}
               >
                 <Combine size={16} />
@@ -1917,6 +1964,21 @@ export function OnboardEditor() {
                   aria-valuenow={stitchProgress ?? 0}
                 >
                   <span style={{ width: `${stitchProgress ?? 0}%` }} />
+                </div>
+              </div>
+            )}
+            {gifImportProgress && (
+              <div className="stitch-progress" role="status" aria-live="polite">
+                <span>Preparing {gifImportProgress.fileName} for editing · {gifImportProgress.progress}%</span>
+                <div
+                  className="remote-import-progress"
+                  role="progressbar"
+                  aria-label="Preparing GIF for editing"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={gifImportProgress.progress}
+                >
+                  <span style={{ width: `${gifImportProgress.progress}%` }} />
                 </div>
               </div>
             )}
@@ -2011,9 +2073,24 @@ export function OnboardEditor() {
                       {remoteSourceProgress.total ? ` of ${formatByteCount(remoteSourceProgress.total)}` : ' loaded'}
                     </span>
                   </>
+                ) : gifImportProgress ? (
+                  <>
+                    <strong>Preparing {gifImportProgress.fileName} for editing</strong>
+                    <div
+                      className="remote-import-progress"
+                      role="progressbar"
+                      aria-label="Preparing GIF for editing"
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-valuenow={gifImportProgress.progress}
+                    >
+                      <span style={{ width: `${gifImportProgress.progress}%` }} />
+                    </div>
+                    <span>{gifImportProgress.progress}%</span>
+                  </>
                 ) : (
                   <>
-                    <strong className="desktop-dropzone-label">Drop an MP4 or MOV to begin</strong>
+                    <strong className="desktop-dropzone-label">Drop an MP4, MOV, WEBM, or GIF to begin</strong>
                     <span>or <button type="button" onClick={() => fileInput.current?.click()}>browse files</button></span>
                     <span className="mobile-dropzone-label">
                       <button type="button" onClick={() => fileInput.current?.click()}>browse files</button> to begin

@@ -1,6 +1,6 @@
 # Onboard
 
-Onboard is an independent, browser-based MP4 and MOV video editor. It is not part of VaultX and does not use VaultX's API, authentication, database, or file storage. Video selection, preview, and MP4 processing happen in the browser; exported MP4s are offered as direct downloads and are not uploaded or saved to a server.
+Onboard is an independent, browser-based video editor that exports MP4. It is not part of VaultX and does not use VaultX's API, authentication, database, or file storage. Video selection, preview, and MP4 processing happen in the browser; exported MP4s are offered as direct downloads and are not uploaded or saved to a server.
 
 **v0.2 "Working Build"** — after the combined GitHub Pages deployment, [open Onboard](https://mackledorf.github.io/VaultX/Onboard/). VaultX is served separately at the repository root.
 
@@ -15,7 +15,7 @@ The app runs at the local Vite address shown in the terminal. The FFmpeg/WASM ru
 
 ## Editing and export
 
-- Accepts MP4 and MOV videos from the user's device without product-imposed input size, duration, or dimension caps. HEVC/H.265 video support depends on browser and bundled FFmpeg codec support; practical support also depends on browser memory and available device resources. HEIC/HEIF still images are not video sources.
+- Accepts MP4, MOV, and WEBM videos plus GIFs from the user's device without product-imposed input size, duration, or dimension caps. GIFs are converted locally to a temporary MP4 for preview and editing; WEBM preview depends on browser codec support. HEVC/H.265 support also depends on browser and bundled FFmpeg codec support; practical support depends on browser memory and available device resources. HEIC/HEIF still images are not video sources.
 - The Source panel offers local upload, direct MP4 URL loading, and Stitch. Stitch accepts multiple local MP4/MOV files, joins them in selection order into one temporary MP4, and replaces the current source for editing. Clips are normalized to a shared frame size while preserving their aspect ratios and audio; silent clips receive silence when other clips have audio. Stitching re-encodes the video and may take time or require substantial browser memory.
 - On phones and narrow screens, the editor keeps the preview large and uses centered buttons in a full-width bottom bar to switch among Video, Adjust, and Crop. The Video panel has a compact thumbnail timeline; Adjust uses a horizontal icon chooser and one slider; Crop combines playback rate, rotation, and crop presets. A header action menu provides Export, Source, and Stitch, and Source and Stitch use local device pickers. The desktop layout continues to show its editing panels beside the preview.
 - The Source link button accepts direct MP4 URLs that allow cross-origin access (CORS). With the optional Chrome extension and site permissions enabled, it also accepts supported public X and Redgifs post URLs; other page URLs, DRM, and segmented streams are not supported.

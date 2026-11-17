@@ -2,6 +2,15 @@
 
 This log records product and interface iterations so prior decisions can be understood and individual changes can be reviewed or restored without undoing unrelated work. For older milestones, exact dates were not recorded.
 
+## 2026-11-16
+
+### Added GIF and WEBM source imports
+
+- Accept GIF and WEBM files through the local source picker and drag-and-drop flow.
+- Convert GIFs locally to temporary MP4 sources for browser preview and editing, and pass WEBM sources to the editor using their original container.
+- Keep multi-file Stitch limited to its existing MP4/MOV formats and continue exporting edits as MP4.
+- Rationale: let users bring more local media into the existing edit-and-export workflow without uploading or retaining source files.
+
 ## 2026-11-15
 
 ### Streamlined extension setup

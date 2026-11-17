@@ -5,7 +5,7 @@ import wasmURL from '@ffmpeg/core/wasm?url';
 import { describeFfmpegFailure } from './exportDiagnostics';
 import { videoHasAudio } from './mediaProbe';
 import { buildStitchFilter, getStitchOutputDimensions, type VideoDimensions } from './stitchRecipe';
-import { getVideoContainerExtension, isSupportedVideoFile } from './videoSource';
+import { getVideoContainerExtension, isSupportedStitchFile } from './videoSource';
 
 export async function stitchVideos(
   files: File[],
@@ -13,7 +13,7 @@ export async function stitchVideos(
   signal: AbortSignal,
 ) {
   if (files.length < 2) throw new Error('Select at least two videos to stitch.');
-  if (files.some((file) => !isSupportedVideoFile(file))) {
+  if (files.some((file) => !isSupportedStitchFile(file))) {
     throw new Error('Choose MP4 or MOV video files.');
   }
   if (signal.aborted) throw new DOMException('Stitch cancelled.', 'AbortError');
