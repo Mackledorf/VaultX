@@ -4,6 +4,12 @@ This log records product and interface iterations so prior decisions can be unde
 
 ## 2026-11-18
 
+### Started range-loading support
+
+- Add an extension-side, one-time-token-bound byte-range session with response validation, source-change detection, cancellation, and diagnostic errors.
+- Keep the existing full-file import unchanged; progressive preview, selection, and partial export are not available yet.
+- Rationale: establish a safe transport for testing on-demand editing without presenting incomplete files as finished imports.
+
 ### Fixed extension bridge startup race
 
 - Start the extension bridge before the editor scripts and retry the handoff briefly if the bridge loads late.

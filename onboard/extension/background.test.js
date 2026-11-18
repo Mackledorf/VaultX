@@ -24,13 +24,13 @@ globalThis.chrome = {
 };
 await import('./background.js');
 
-function createPort(url = 'https://mackledorf.github.io/VaultX/Onboard/') {
+function createPort(url = 'https://mackledorf.github.io/VaultX/Onboard/', name = 'onboard-share-import') {
   let onMessage;
   let onDisconnect;
   const messages = [];
   let resolveMessage;
   const port = {
-    name: 'onboard-share-import',
+    name,
     sender: { id: 'test-extension', frameId: 0, url },
     onMessage: { addListener(listener) { onMessage = listener; } },
     onDisconnect: { addListener(listener) { onDisconnect = listener; } },
@@ -167,6 +167,100 @@ test('cancellation aborts an in-flight transfer without reporting success', asyn
     await new Promise((resolve) => setTimeout(resolve, 0));
     assert.equal(downloadSignal.aborted, true);
     assert.equal(port.messages.some((message) => message.type === 'done'), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('range sessions only read the one-time selected source and transfer bounded chunks', async () => {
+  const originalFetch = globalThis.fetch;
+  const token = '33333333-3333-4333-8333-333333333333';
+  const source = new Uint8Array(70000).map((_, index) => index % 251);
+  allowed = true;
+  session[`import:${token}`] = 'https://cdn.example/clip.mp4';
+  globalThis.fetch = async (target, options) => {
+    assert.equal(target, 'https://cdn.example/clip.mp4');
+    assert.equal(options.headers.Range, 'bytes=0-69999');
+    assert.equal(options.credentials, 'omit');
+    return new Response(source, { status: 206, headers: { 'Content-Range': 'bytes 0-69999/70000', ETag: '"v1"' } });
+  };
+  try {
+    const untrusted = createPort('https://mackledorf.github.io/other/', 'onboard-range-import');
+    connect(untrusted);
+    assert.equal(untrusted.disconnected, true);
+    const port = createPort(undefined, 'onboard-range-import');
+    connect(port);
+    port.send({ type: 'range-start', token });
+    await port.next('range-ready');
+    assert.equal(session[`import:${token}`], undefined);
+    port.send({ type: 'range-read', id: 1, start: 0, end: 69999 });
+    assert.equal((await port.next('range-response')).total, source.length);
+    await port.next('range-chunk');
+    assert.equal(port.messages.filter((message) => message.type === 'range-chunk').length, 1);
+    port.send({ type: 'range-ack', id: 1 });
+    while (port.messages.filter((message) => message.type === 'range-chunk').length < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    port.send({ type: 'range-ack', id: 1 });
+    await port.next('range-done');
+    const received = Buffer.concat(port.messages.filter((message) => message.type === 'range-chunk')
+      .map((message) => Buffer.from(message.data, 'base64')));
+    assert.deepEqual(received, Buffer.from(source));
+
+    const replay = createPort(undefined, 'onboard-range-import');
+    connect(replay);
+    replay.send({ type: 'range-start', token });
+    assert.match((await replay.next('range-error')).message, /\[IMPORT_HANDOFF\]/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('range cancellation aborts pending transfers without sending success', async () => {
+  const originalFetch = globalThis.fetch;
+  const token = '44444444-4444-4444-8444-444444444444';
+  allowed = true;
+  session[`import:${token}`] = 'https://cdn.example/clip.mp4';
+  globalThis.fetch = async () => new Response(new Uint8Array(100000), {
+    status: 206, headers: { 'Content-Range': 'bytes 0-99999/100000', ETag: '"v1"' },
+  });
+  try {
+    const port = createPort(undefined, 'onboard-range-import');
+    connect(port);
+    port.send({ type: 'range-start', token });
+    await port.next('range-ready');
+    port.send({ type: 'range-read', id: 1, start: 0, end: 99999 });
+    await port.next('range-chunk');
+    port.send({ type: 'range-cancel', id: 1 });
+    await port.next('range-cancelled');
+    assert.equal(port.messages.some((message) => message.type === 'range-done'), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('cancelling a range aborts the underlying network request', async () => {
+  const originalFetch = globalThis.fetch;
+  const token = '55555555-5555-4555-8555-555555555555';
+  let downloadSignal;
+  allowed = true;
+  session[`import:${token}`] = 'https://cdn.example/clip.mp4';
+  globalThis.fetch = async (_url, options) => {
+    downloadSignal = options.signal;
+    return new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+    });
+  };
+  try {
+    const port = createPort(undefined, 'onboard-range-import');
+    connect(port);
+    port.send({ type: 'range-start', token });
+    await port.next('range-ready');
+    port.send({ type: 'range-read', id: 1, start: 0, end: 100 });
+    port.send({ type: 'range-cancel', id: 1 });
+    await port.next('range-cancelled');
+    assert.equal(downloadSignal.aborted, true);
+    assert.equal(port.messages.some((message) => message.type === 'range-done'), false);
   } finally {
     globalThis.fetch = originalFetch;
   }

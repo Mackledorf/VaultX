@@ -1,5 +1,6 @@
 import { fetchSharedVideo, parseSharedUrl, resolveSharedVideo, SITE_PERMISSIONS } from './resolver.js';
 import { installNetworkScanner } from './network.js';
+import { connectRangeSource } from './rangeSession.js';
 
 installNetworkScanner();
 const claimedTokens = new Set();
@@ -24,9 +25,36 @@ function encodeBytes(bytes) {
   return btoa(result);
 }
 
+async function claimSelectedUrl(token) {
+  if (!/^[0-9a-f-]{36}$/.test(token)) throw new Error('[IMPORT_HANDOFF] Invalid import token.');
+  if (claimedTokens.has(token)) throw new Error('[IMPORT_HANDOFF] This import has already started.');
+  claimedTokens.add(token);
+  try {
+    const key = `import:${token}`;
+    const stored = await chrome.storage.session.get(key);
+    await chrome.storage.session.remove(key);
+    if (typeof stored[key] !== 'string') throw new Error('[IMPORT_HANDOFF] This import has expired. Select the source again.');
+    const url = new URL(stored[key]);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
+      throw new Error('[IMPORT_URL] Only HTTP(S) URLs without credentials are supported.');
+    }
+    if (!await chrome.permissions.contains({ origins: ['<all_urls>'] })) {
+      throw new Error('[IMPORT_PERMISSION] Allow site access in the extension and scan again.');
+    }
+    return url;
+  } finally {
+    claimedTokens.delete(token);
+  }
+}
+
 chrome.runtime.onConnect.addListener((port) => {
-  if (port.name !== 'onboard-share-import' || !isEditor(port.sender)) {
+  if (!['onboard-share-import', 'onboard-range-import'].includes(port.name)) return;
+  if (!isEditor(port.sender)) {
     port.disconnect();
+    return;
+  }
+  if (port.name === 'onboard-range-import') {
+    connectRangeSource(port, claimSelectedUrl, encodeBytes);
     return;
   }
   const controller = new AbortController();
@@ -54,23 +82,8 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 
   async function importDirectVideo(token) {
-    let claimed = false;
     try {
-      if (!/^[0-9a-f-]{36}$/.test(token)) throw new Error('[IMPORT_HANDOFF] Invalid import token.');
-      if (claimedTokens.has(token)) throw new Error('[IMPORT_HANDOFF] This import has already started.');
-      claimedTokens.add(token);
-      claimed = true;
-      const key = `import:${token}`;
-      const stored = await chrome.storage.session.get(key);
-      await chrome.storage.session.remove(key);
-      if (typeof stored[key] !== 'string') throw new Error('[IMPORT_HANDOFF] This import has expired. Select the source again.');
-      const url = new URL(stored[key]);
-      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
-        throw new Error('[IMPORT_URL] Only HTTP(S) URLs without credentials are supported.');
-      }
-      if (!await chrome.permissions.contains({ origins: ['<all_urls>'] })) {
-        throw new Error('[IMPORT_PERMISSION] Allow site access in the extension and scan again.');
-      }
+      const url = await claimSelectedUrl(token);
       let response;
       try {
         response = await fetch(url.href, { signal: controller.signal, credentials: 'omit', referrerPolicy: 'no-referrer' });
@@ -99,8 +112,6 @@ chrome.runtime.onConnect.addListener((port) => {
         const message = error instanceof Error ? error.message : 'Could not import this video.';
         port.postMessage({ type: 'error', message: message.startsWith('[IMPORT_') ? message : `[IMPORT_ERROR] ${message}` });
       }
-    } finally {
-      if (claimed) claimedTokens.delete(token);
     }
   }
 

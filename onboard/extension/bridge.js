@@ -5,11 +5,12 @@
   if (window !== window.top || (!isProduction && !isLocal)) return;
 
   window.addEventListener('message', (event) => {
-    if (event.source !== window || event.origin !== location.origin || event.data?.type !== 'onboard-share-import' || event.ports.length !== 1) return;
+    if (event.source !== window || event.origin !== location.origin
+        || !['onboard-share-import', 'onboard-range-import'].includes(event.data?.type) || event.ports.length !== 1) return;
     const channel = event.ports[0];
     let port;
     try {
-      port = chrome.runtime.connect({ name: 'onboard-share-import' });
+      port = chrome.runtime.connect({ name: event.data.type });
     } catch {
       channel.postMessage({ type: 'error', message: '[IMPORT_BRIDGE] The Onboard extension is unavailable. Reload the page and try again.' });
       channel.close();
