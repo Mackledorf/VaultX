@@ -1,6 +1,31 @@
-export function scanDirectMp4s() {
+export function scanVideoSources() {
   const candidates = new Map();
   const pageTitle = document.title || 'Video';
+
+  function addSharedPost(rawUrl) {
+    if (!rawUrl) return;
+    let url;
+    try {
+      url = new URL(rawUrl, location.href);
+    } catch {
+      return;
+    }
+    if (url.protocol !== 'https:' || url.username || url.password || url.port
+        || !['redgifs.com', 'www.redgifs.com'].includes(url.hostname.toLowerCase())) return;
+    const match = url.pathname.match(/^\/(?:watch|ifr)\/([A-Za-z0-9]+)\/?$/);
+    if (!match) return;
+    const id = match[1].toLowerCase();
+    const canonicalUrl = `https://www.redgifs.com/watch/${id}`;
+    candidates.set(canonicalUrl, {
+      kind: 'shared-post',
+      url: canonicalUrl,
+      name: id,
+      host: 'redgifs.com',
+      width: 0,
+      height: 0,
+      duration: 0,
+    });
+  }
 
   function add(rawUrl, mimeType = '', video = null, title = '', isVideoSource = false) {
     if (!rawUrl) return;
@@ -56,15 +81,21 @@ export function scanDirectMp4s() {
     }
 
     for (const anchor of root.querySelectorAll('a[href]')) {
+      addSharedPost(anchor.href);
       add(anchor.href, anchor.getAttribute('type') || '', null, anchor.getAttribute('title') || anchor.textContent || '');
+    }
+    for (const frame of root.querySelectorAll('iframe[src]')) {
+      addSharedPost(frame.src || frame.getAttribute('src'));
     }
     for (const element of root.querySelectorAll('*')) {
       if (element.shadowRoot) scanRoot(element.shadowRoot);
     }
   }
 
+  addSharedPost(location.href);
   scanRoot(document);
   for (const entry of performance.getEntriesByType('resource')) {
+    addSharedPost(entry.name);
     add(entry.name);
   }
 

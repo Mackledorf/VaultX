@@ -1,4 +1,4 @@
-import { scanDirectMp4s } from './scanner.js';
+import { scanVideoSources } from './scanner.js';
 import { SITE_PERMISSIONS } from './resolver.js';
 
 const ONBOARD_URL = 'https://mackledorf.github.io/VaultX/Onboard/';
@@ -39,12 +39,12 @@ function setStatus(message, type = '') {
 function renderCandidates(candidates) {
   candidateList.replaceChildren();
   if (!candidates.length) {
-    setStatus('[SCAN_EMPTY] No MP4s found yet. Play or reload the video, then scan again. This page may use a stream or protected media.');
+    setStatus('[SCAN_EMPTY] No supported sources found yet. Play or reload the video, then scan again. This page may use a stream or protected media.');
     return;
   }
 
-  const bestHeight = candidates[0].height;
-  setStatus(`${candidates.length} direct MP4 ${candidates.length === 1 ? 'source' : 'sources'} found.`);
+  const bestHeight = candidates.reduce((height, candidate) => Math.max(height, candidate.height), 0);
+  setStatus(`${candidates.length} video ${candidates.length === 1 ? 'source' : 'sources'} found.`);
 
   for (const candidate of candidates) {
     const item = document.createElement('li');
@@ -57,7 +57,7 @@ function renderCandidates(candidates) {
     name.textContent = candidate.name;
     heading.append(name);
 
-    if (bestHeight > 0 && candidate.height === bestHeight) {
+    if (candidate.kind !== 'shared-post' && bestHeight > 0 && candidate.height === bestHeight) {
       const badge = document.createElement('span');
       badge.className = 'best-badge';
       badge.textContent = 'Best observed';
@@ -67,7 +67,7 @@ function renderCandidates(candidates) {
     const metadata = document.createElement('div');
     metadata.className = 'candidate-meta';
     const quality = document.createElement('span');
-    quality.textContent = formatQuality(candidate);
+    quality.textContent = candidate.kind === 'shared-post' ? 'Shared video' : formatQuality(candidate);
     metadata.append(quality);
     if (candidate.duration > 0) {
       const duration = document.createElement('span');
@@ -84,6 +84,17 @@ function renderCandidates(candidates) {
     openButton.type = 'button';
     openButton.textContent = 'Open in Onboard';
     openButton.addEventListener('click', async () => {
+      if (candidate.kind === 'shared-post') {
+        try {
+          const target = new URL(ONBOARD_URL);
+          target.hash = new URLSearchParams({ source: candidate.url }).toString();
+          await chrome.tabs.create({ url: target.href });
+          setStatus('Opening the selected source in Onboard…');
+        } catch (error) {
+          setStatus(`[IMPORT_OPEN] Could not open Onboard: ${error instanceof Error ? error.message : String(error)}`, 'error');
+        }
+        return;
+      }
       const token = crypto.randomUUID();
       const key = `import:${token}`;
       try {
@@ -114,7 +125,8 @@ function renderCandidates(candidates) {
 
     const actions = document.createElement('div');
     actions.className = 'candidate-actions';
-    actions.append(openButton, downloadButton);
+    actions.append(openButton);
+    if (candidate.kind !== 'shared-post') actions.append(downloadButton);
     item.append(heading, metadata, actions);
     candidateList.append(item);
   }
@@ -141,14 +153,17 @@ async function scanActivePage() {
     if (observed?.error) throw new Error(`[SCAN_OBSERVER] ${observed.error}`);
     const executions = await chrome.scripting.executeScript({
       target: { tabId: tab.id, allFrames: true },
-      func: scanDirectMp4s,
+      func: scanVideoSources,
     });
     const candidates = new Map();
     for (const candidate of [...(observed?.candidates ?? []), ...executions.flatMap((execution) => execution.result ?? [])]) {
       const previous = candidates.get(candidate.url);
       if (!previous || candidate.height > previous.height) candidates.set(candidate.url, candidate);
     }
-    renderCandidates([...candidates.values()].sort((a, b) => b.height - a.height || b.width - a.width || a.name.localeCompare(b.name)));
+    renderCandidates([...candidates.values()].sort((a, b) => (
+      Number(b.kind === 'shared-post') - Number(a.kind === 'shared-post')
+      || b.height - a.height || b.width - a.width || a.name.localeCompare(b.name)
+    )));
     if (observed?.warning) setStatus(`[SCAN_STORAGE] Some observed requests could not be saved: ${observed.warning}`, 'error');
   } catch (error) {
     setStatus(`[SCAN_ERROR] ${error instanceof Error ? error.message : String(error)}`, 'error');

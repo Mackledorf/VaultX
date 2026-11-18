@@ -4,6 +4,11 @@ This log records product and interface iterations so prior decisions can be unde
 
 ## 2026-11-18
 
+### Improved shared-video discovery
+
+- Detect supported shared-video links in pages and embeds, and open selected links through the existing local importer while retaining direct MP4 scanning.
+- Rationale: let embedded videos be imported when the page does not expose a direct MP4.
+
 ### Added reductionist editing and timeline zoom
 
 - Add a separate, initially empty reductionist timeline where users mark in and out points and add non-overlapping clips; switching modes preserves both timelines.

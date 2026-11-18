@@ -109,6 +109,30 @@ test('transfers the selected extensionless MP4 to the editor', async () => {
   }
 });
 
+test('imports a discovered shared post through the existing resolver', async () => {
+  const originalFetch = globalThis.fetch;
+  allowed = true;
+  globalThis.fetch = async (url) => {
+    if (url.endsWith('/auth/temporary')) return Response.json({ token: 'test-token' });
+    if (url.endsWith('/v2/gifs/example')) {
+      return Response.json({ gif: { urls: { hd: 'https://media.redgifs.com/example.mp4' } } });
+    }
+    assert.equal(url, 'https://media.redgifs.com/example.mp4');
+    return new Response('video', { headers: { 'content-type': 'video/mp4' } });
+  };
+  try {
+    const port = createPort();
+    connect(port);
+    port.send({ type: 'start', url: 'https://www.redgifs.com/watch/example' });
+    assert.equal((await port.next('start')).name, 'redgifs-example.mp4');
+    assert.equal(Buffer.from((await port.next('chunk')).data, 'base64').toString(), 'video');
+    port.send({ type: 'ack' });
+    await port.next('done');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('streams bounded chunks only after acknowledgements', async () => {
   const originalFetch = globalThis.fetch;
   const source = new Uint8Array(140000).map((_, index) => index % 251);

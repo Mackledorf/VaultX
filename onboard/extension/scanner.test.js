@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { scanDirectMp4s } from './scanner.js';
+import { scanVideoSources } from './scanner.js';
 
 function installGlobals(values) {
   const previous = new Map();
@@ -59,7 +59,7 @@ test('finds and deduplicates direct MP4 candidates while excluding streams', () 
   });
 
   try {
-    const candidates = scanDirectMp4s();
+    const candidates = scanVideoSources();
     assert.equal(candidates.length, 1);
     assert.equal(candidates[0].url, sourceUrl);
     assert.equal(candidates[0].height, 1080);
@@ -98,7 +98,7 @@ test('includes MP4 sources identified by MIME type without an mp4 path suffix', 
   });
 
   try {
-    assert.equal(scanDirectMp4s()[0].url, sourceUrl);
+    assert.equal(scanVideoSources()[0].url, sourceUrl);
   } finally {
     restore();
   }
@@ -128,7 +128,48 @@ test('finds extensionless video sources in open shadow roots but excludes manife
     performance: { getEntriesByType: () => [] },
   });
   try {
-    assert.deepEqual(scanDirectMp4s().map((candidate) => candidate.url), ['https://cdn.example/play?id=42']);
+    assert.deepEqual(scanVideoSources().map((candidate) => candidate.url), ['https://cdn.example/play?id=42']);
+  } finally {
+    restore();
+  }
+});
+
+test('discovers and deduplicates supported post links, embeds, frame pages and resources', () => {
+  const anchor = (href) => ({ href, textContent: '', getAttribute: () => null });
+  const shadowRoot = {
+    querySelectorAll(selector) {
+      if (selector === 'iframe[src]') return [{ src: 'https://redgifs.com/ifr/Second?embed=1' }];
+      return [];
+    },
+  };
+  const restore = installGlobals({
+    document: {
+      title: 'Post',
+      querySelectorAll(selector) {
+        if (selector === 'a[href]') return [
+          anchor('https://www.redgifs.com/watch/Example?ref=share'),
+          anchor('https://redgifs.com/ifr/example#embed'),
+          anchor('https://redgifs.com.evil.example/watch/unsafe'),
+          anchor('https://user@redgifs.com/watch/unsafe'),
+          anchor('https://redgifs.com/users/example'),
+        ];
+        if (selector === 'iframe[src]') return [{ src: 'https://www.redgifs.com/ifr/Example' }];
+        if (selector === '*') return [{ shadowRoot }];
+        return [];
+      },
+    },
+    location: { href: 'https://redgifs.com/ifr/Third' },
+    performance: { getEntriesByType: () => [{ name: 'https://redgifs.com/watch/Fourth' }] },
+  });
+  try {
+    const candidates = scanVideoSources();
+    assert.deepEqual(candidates.map((candidate) => candidate.url).sort(), [
+      'https://www.redgifs.com/watch/example',
+      'https://www.redgifs.com/watch/fourth',
+      'https://www.redgifs.com/watch/second',
+      'https://www.redgifs.com/watch/third',
+    ]);
+    assert.ok(candidates.every((candidate) => candidate.kind === 'shared-post'));
   } finally {
     restore();
   }
