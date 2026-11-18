@@ -91,27 +91,29 @@ test('bundled encoder preserves trimmed and retimed audio and stitches silent cl
     assert.ok(peak(stitched, 1, 3) < 0.001);
     assert.ok(peak(stitched, 4.5, 5.5) > 0.08);
 
-    const mixedCrops = normalizeEditRecipe({
+    const sectionCrops = normalizeEditRecipe({
       segments: [
         { startTime: 0, endTime: 1, playbackRate: 1, crop: { x: 0.125, y: 0, width: 0.75, height: 1 } },
-        { startTime: 2, endTime: 3, playbackRate: 1, crop: { x: 0, y: 0.25, width: 1, height: 0.5 } },
+        { startTime: 2, endTime: 3, playbackRate: 1, crop: { x: 0.3125, y: 0.25, width: 0.375, height: 0.5 } },
       ],
       rotation: 0,
       crop: { x: 0, y: 0, width: 1, height: 1 },
     }, 4);
     run(
-      '-i', 'source.mp4', '-filter_complex', buildMp4Filter(mixedCrops, true, false, true, { width: 64, height: 48 }),
+      '-i', 'source.mp4', '-filter_complex', buildMp4Filter(sectionCrops, true, false, true, { width: 64, height: 48 }),
       '-map', '[out]', '-map', '[aout]', '-c:v', 'libx264', '-preset', 'ultrafast',
-      '-c:a', 'aac', 'mixed-crops.mp4',
+      '-c:a', 'aac', 'section-crops.mp4',
     );
-    run('-i', 'mixed-crops.mp4', '-map', '0:v:0', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'mixed-crops.raw');
-    const pixels = core.FS.readFile('mixed-crops.raw');
+    run('-i', 'section-crops.mp4', '-map', '0:v:0', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'section-crops.raw');
+    const pixels = core.FS.readFile('section-crops.raw');
     const frameBytes = 48 * 48 * 3;
     assert.equal(pixels.length, 60 * frameBytes);
     const pixel = (frame: number, x: number, y: number) => pixels.slice(frame * frameBytes + (y * 48 + x) * 3, frame * frameBytes + (y * 48 + x) * 3 + 3);
-    assert.ok(pixel(45, 24, 2).every((channel) => channel < 10), 'second section has black padding');
     assert.ok(pixel(45, 24, 24).some((channel) => channel > 30), 'second section retains its image');
-    assert.ok(peak(decodeAudio('mixed-crops.mp4', 'mixed-crops-audio.raw'), 1.25, 1.75) > 0.015);
+    const sectionAudio = decodeAudio('section-crops.mp4', 'section-crops-audio.raw');
+    assert.ok(Math.abs(sectionAudio.length / 48000 - 2) < 0.05);
+    assert.ok(peak(sectionAudio, 0.25, 0.75) > 0.08);
+    assert.ok(peak(sectionAudio, 1.25, 1.75) > 0.015 && peak(sectionAudio, 1.25, 1.75) < 0.06);
   } finally {
     if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
     else Reflect.deleteProperty(globalThis, 'self');
