@@ -5,7 +5,7 @@ import { createLivePreview } from '../lib/livePreview';
 import { getPlaybackTransition } from '../lib/playback';
 import { buildPreviewTransferTable, getAdjustmentRange, getColorTransform, getEditedDuration, isTimeInSegments, preflightExport, validateSourceDimensions } from '../lib/recipe';
 import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
-import { fetchSharedPost, isSharedPostUrl } from '../lib/sharedSource';
+import { fetchExtensionMp4, fetchSharedPost, isSharedPostUrl } from '../lib/sharedSource';
 import { convertGifToMp4 } from '../lib/sourcePreparation';
 import { stitchVideos } from '../lib/stitch';
 import { isGifFile, isSupportedVideoFile } from '../lib/videoSource';
@@ -180,7 +180,10 @@ export function OnboardEditor() {
   const [deletingSavedLookId, setDeletingSavedLookId] = useState<string | null>(null);
   const [error, setError] = useState('');
   const [remoteSourceProgress, setRemoteSourceProgress] = useState<RemoteSourceProgressState | null>(null);
-  const [remoteSourceHandoff] = useState(() => new URLSearchParams(window.location.hash.slice(1)).get('source'));
+  const [remoteSourceHandoff] = useState(() => {
+    const params = new URLSearchParams(window.location.hash.slice(1));
+    return { source: params.get('source'), token: params.get('import') };
+  });
   const [remoteSourceUrl, setRemoteSourceUrl] = useState('');
   const [showRemoteSourceInput, setShowRemoteSourceInput] = useState(false);
   const [isStitching, setIsStitching] = useState(false);
@@ -663,32 +666,44 @@ export function OnboardEditor() {
     setAdjustments(Object.fromEntries(ADJUSTMENTS.map(([key]) => [key, 0])));
   }
 
-  function importRemoteSource(value: string) {
+  function importRemoteSource(value: string, token?: string) {
     if (isStitching || gifPreparationController.current) {
       setError('Wait for the current source operation to finish before loading another source.');
       return;
     }
-    let sourceUrl: URL;
-    try {
-      sourceUrl = parseRemoteMp4Url(value.trim());
-    } catch (sourceError) {
-      setError(sourceError instanceof Error ? sourceError.message : 'The video source URL is invalid.');
-      return;
+    let sourceUrl: URL | null = null;
+    if (!token) {
+      try {
+        sourceUrl = parseRemoteMp4Url(value.trim());
+      } catch (sourceError) {
+        setError(sourceError instanceof Error ? sourceError.message : 'The video source URL is invalid.');
+        return;
+      }
     }
 
     remoteImportController.current?.abort();
     const controller = new AbortController();
     remoteImportController.current = controller;
-    const pathName = sourceUrl.pathname.split('/').filter(Boolean).at(-1) || 'video.mp4';
+    const pathName = sourceUrl?.pathname.split('/').filter(Boolean).at(-1) || 'video.mp4';
     setError('');
     setRemoteSourceProgress({ fileName: pathName, loaded: 0, total: null });
 
-    const importSource = isSharedPostUrl(sourceUrl) ? fetchSharedPost : fetchRemoteMp4;
-    void importSource(sourceUrl, (progress) => {
+    const onProgress = (progress: RemoteSourceProgress) => {
       if (remoteImportController.current === controller) {
         setRemoteSourceProgress({ ...progress, fileName: pathName });
       }
-    }, controller.signal)
+    };
+    let importPromise: Promise<File>;
+    if (token) {
+      importPromise = fetchExtensionMp4(token, onProgress, controller.signal);
+    } else if (sourceUrl) {
+      importPromise = isSharedPostUrl(sourceUrl)
+        ? fetchSharedPost(sourceUrl, onProgress, controller.signal)
+        : fetchRemoteMp4(sourceUrl, onProgress, controller.signal);
+    } else {
+      throw new Error('A source URL or extension token is required.');
+    }
+    void importPromise
       .then((sourceFile) => {
         if (remoteImportController.current !== controller) return;
         remoteImportController.current = null;
@@ -706,13 +721,14 @@ export function OnboardEditor() {
   }
 
   useEffect(() => {
-    if (remoteSourceHandoff === null) return;
+    if (remoteSourceHandoff.source === null && remoteSourceHandoff.token === null) return;
     window.history.replaceState(
       window.history.state,
       '',
       `${window.location.pathname}${window.location.search}`,
     );
-    importRemoteSource(remoteSourceHandoff);
+    const timer = window.setTimeout(() => importRemoteSource(remoteSourceHandoff.source ?? '', remoteSourceHandoff.token ?? undefined), 0);
+    return () => window.clearTimeout(timer);
   }, [remoteSourceHandoff]);
 
   function beginRename() {
@@ -801,7 +817,7 @@ export function OnboardEditor() {
   }
 
   function onVideoLoadError() {
-    setError('The browser could not load or decode this video source. Its codec may not be supported by this browser or device; try an H.264-encoded MP4.');
+    setError('[PREVIEW_DECODE] The browser could not load or decode this video source. Its codec may not be supported by this browser or device; try an H.264-encoded MP4.');
   }
 
   function onVideoDataReady() {

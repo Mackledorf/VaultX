@@ -103,3 +103,33 @@ test('includes MP4 sources identified by MIME type without an mp4 path suffix', 
     restore();
   }
 });
+
+test('finds extensionless video sources in open shadow roots but excludes manifests and blob URLs', () => {
+  const video = {
+    currentSrc: 'https://cdn.example/play?id=42',
+    src: 'blob:https://page.example/123',
+    videoWidth: 0, videoHeight: 0, duration: 0,
+    getAttribute: () => null,
+    querySelectorAll: () => [],
+  };
+  const root = {
+    querySelectorAll(selector) {
+      if (selector === 'video') return [video];
+      if (selector === 'a[href]') return [{ href: 'https://cdn.example/playlist.m3u8', getAttribute: () => null, textContent: '' }];
+      return [];
+    },
+  };
+  const restore = installGlobals({
+    document: {
+      title: 'Video',
+      querySelectorAll: (selector) => selector === '*' ? [{ shadowRoot: root }] : [],
+    },
+    location: { href: 'https://page.example/' },
+    performance: { getEntriesByType: () => [] },
+  });
+  try {
+    assert.deepEqual(scanDirectMp4s().map((candidate) => candidate.url), ['https://cdn.example/play?id=42']);
+  } finally {
+    restore();
+  }
+});

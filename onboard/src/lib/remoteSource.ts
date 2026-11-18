@@ -35,16 +35,17 @@ export async function fetchRemoteMp4(
     });
   } catch (error) {
     if (signal.aborted) throw error;
-    throw new Error('Onboard could not read this source. The site may block cross-origin access (CORS).');
+    throw new Error('[URL_NETWORK] Onboard could not read this source. The site may block cross-origin access (CORS).');
   }
 
-  if (!response.ok) throw new Error(`The video source returned HTTP ${response.status}.`);
+  if (!response.ok) throw new Error(`[URL_HTTP_${response.status}] The video source returned HTTP ${response.status}.`);
+  if (response.status === 206) throw new Error('[URL_PARTIAL] The host returned only part of the video. A complete MP4 is required.');
 
   const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() ?? '';
   const hasMp4Path = url.pathname.toLowerCase().endsWith('.mp4');
   const acceptedType = contentType === 'video/mp4'
     || (hasMp4Path && (contentType === '' || contentType === 'application/octet-stream' || contentType === 'binary/octet-stream'));
-  if (!acceptedType) throw new Error('The selected source did not return a directly readable MP4.');
+  if (!acceptedType) throw new Error('[URL_FORMAT] The selected source did not return a directly readable MP4.');
 
   const reader = response.body?.getReader();
   if (!reader) throw new Error('The video response did not contain a readable file.');

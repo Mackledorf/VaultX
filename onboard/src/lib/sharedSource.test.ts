@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fetchSharedPost, isSharedPostUrl } from './sharedSource';
+import { fetchExtensionMp4, fetchSharedPost, isSharedPostUrl } from './sharedSource';
 
 function installWindow(onConnect: (port: MessagePort) => void) {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -46,11 +46,36 @@ test('imports chunks with progress and acknowledges each before finishing', asyn
     };
     port.postMessage({ type: 'ready' });
   });
+
   try {
     const file = await fetchSharedPost(new URL('https://x.com/user/status/123'), (value) => progress.push(value), new AbortController().signal);
     assert.equal(file.name, 'x-123.mp4');
     assert.equal(await file.text(), 'test');
     assert.deepEqual(progress, [{ loaded: 0, total: 4 }, { loaded: 4, total: 4 }]);
+  } finally {
+    connection?.close();
+    restore();
+  }
+});
+
+test('imports a selected MP4 through a one-time extension token', async () => {
+  let connection: MessagePort | undefined;
+  const restore = installWindow((port) => {
+    connection = port;
+    port.onmessage = (event: MessageEvent<{ type: string; token?: string }>) => {
+      if (event.data.type === 'start-direct') {
+        assert.equal(event.data.token, 'selected-token');
+        port.postMessage({ type: 'start', name: 'clip.mp4', total: 4 });
+        port.postMessage({ type: 'chunk', data: btoa('test') });
+      } else if (event.data.type === 'ack') port.postMessage({ type: 'done' });
+      else if (event.data.type === 'close') port.close();
+    };
+    port.postMessage({ type: 'ready' });
+  });
+  try {
+    const file = await fetchExtensionMp4('selected-token', () => {}, new AbortController().signal);
+    assert.equal(file.name, 'clip.mp4');
+    assert.equal(await file.text(), 'test');
   } finally {
     connection?.close();
     restore();

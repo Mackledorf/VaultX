@@ -2,6 +2,15 @@
 
 This log records product and interface iterations so prior decisions can be understood and individual changes can be reviewed or restored without undoing unrelated work. For older milestones, exact dates were not recorded.
 
+## 2026-11-18
+
+### Improved extension scanning and diagnostics
+
+- Scan accessible frames and open shadow roots, and optionally observe the selected tab's MP4 responses after the user grants site access.
+- Transfer selected sources through the extension, add a separate browser download action, and label scan, import, download, and preview errors by stage.
+- Keep HLS/DASH and protected streams unsupported; surface actual permission, format, and server failures.
+- Rationale: distinguish missing discoveries, inaccessible media, and editor decoding failures without uploading source media.
+
 ## 2026-11-16
 
 ### Added GIF and WEBM source imports

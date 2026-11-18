@@ -2,7 +2,7 @@ export function scanDirectMp4s() {
   const candidates = new Map();
   const pageTitle = document.title || 'Video';
 
-  function add(rawUrl, mimeType = '', video = null, title = '') {
+  function add(rawUrl, mimeType = '', video = null, title = '', isVideoSource = false) {
     if (!rawUrl) return;
 
     let url;
@@ -12,9 +12,11 @@ export function scanDirectMp4s() {
       return;
     }
 
-    if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) return;
     const mime = mimeType.split(';', 1)[0].trim().toLowerCase();
-    if (!url.pathname.toLowerCase().endsWith('.mp4') && mime !== 'video/mp4') return;
+    const path = url.pathname.toLowerCase();
+    if (/\.(m3u8|mpd|m4s|ts|webm|mov)$/.test(path)) return;
+    if (!path.endsWith('.mp4') && mime !== 'video/mp4' && !(isVideoSource && !mime)) return;
     url.hash = '';
 
     let name = title.trim();
@@ -42,20 +44,26 @@ export function scanDirectMp4s() {
     else if (previous.name === 'video.mp4' && candidate.name !== 'video.mp4') previous.name = candidate.name;
   }
 
-  for (const video of document.querySelectorAll('video')) {
-    const title = video.getAttribute('aria-label') || video.getAttribute('title') || pageTitle;
-    const sources = Array.from(video.querySelectorAll('source'));
-    for (const source of sources) {
-      add(source.src || source.getAttribute('src'), source.type || source.getAttribute('type') || '', video, title);
+  function scanRoot(root) {
+    for (const video of root.querySelectorAll('video')) {
+      const title = video.getAttribute('aria-label') || video.getAttribute('title') || pageTitle;
+      const sources = Array.from(video.querySelectorAll('source'));
+      for (const source of sources) {
+        add(source.src || source.getAttribute('src'), source.type || source.getAttribute('type') || '', video, title, true);
+      }
+      add(video.currentSrc, video.getAttribute('type') || '', video, title, true);
+      add(video.getAttribute('src') || video.src, video.getAttribute('type') || '', video, title, true);
     }
-    add(video.currentSrc, video.getAttribute('type') || '', video, title);
-    add(video.getAttribute('src') || video.src, video.getAttribute('type') || '', video, title);
+
+    for (const anchor of root.querySelectorAll('a[href]')) {
+      add(anchor.href, anchor.getAttribute('type') || '', null, anchor.getAttribute('title') || anchor.textContent || '');
+    }
+    for (const element of root.querySelectorAll('*')) {
+      if (element.shadowRoot) scanRoot(element.shadowRoot);
+    }
   }
 
-  for (const anchor of document.querySelectorAll('a[href]')) {
-    add(anchor.href, anchor.getAttribute('type') || '', null, anchor.getAttribute('title') || anchor.textContent || '');
-  }
-
+  scanRoot(document);
   for (const entry of performance.getEntriesByType('resource')) {
     add(entry.name);
   }

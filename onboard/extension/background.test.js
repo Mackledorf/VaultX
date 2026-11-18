@@ -3,12 +3,24 @@ import { test } from 'node:test';
 
 let connect;
 let allowed = false;
+const session = {};
 globalThis.chrome = {
   runtime: {
     id: 'test-extension',
     onConnect: { addListener(listener) { connect = listener; } },
+    onMessage: { addListener() {} },
+    getURL: (path) => `chrome-extension://test-extension/${path}`,
   },
   permissions: { async contains() { return allowed; } },
+  webRequest: { onHeadersReceived: { addListener() {} } },
+  tabs: { onRemoved: { addListener() {} }, onUpdated: { addListener() {} } },
+  storage: {
+    session: {
+      async get(key) { return { [key]: session[key] }; },
+      async set(values) { Object.assign(session, values); },
+      async remove(key) { delete session[key]; },
+    },
+  },
 };
 await import('./background.js');
 
@@ -51,6 +63,50 @@ test('rejects messages from unrelated pages and reports missing site permissions
   connect(port);
   port.send({ type: 'start', url: 'https://x.com/user/status/123' });
   assert.match((await port.next('error')).message, /Enable X imports/);
+});
+
+test('imports only a selected, one-time direct MP4 and reports HTTP failures', async () => {
+  const originalFetch = globalThis.fetch;
+  const token = '11111111-1111-4111-8111-111111111111';
+  allowed = true;
+  session[`import:${token}`] = 'https://cdn.example/clip.mp4';
+  globalThis.fetch = async (url, options) => {
+    assert.equal(url, 'https://cdn.example/clip.mp4');
+    assert.equal(options.credentials, 'omit');
+    return new Response('denied', { status: 403 });
+  };
+  try {
+    const port = createPort();
+    connect(port);
+    port.send({ type: 'start-direct', token });
+    assert.match((await port.next('error')).message, /\[IMPORT_HTTP_403\]/);
+    assert.equal(session[`import:${token}`], undefined);
+    const replay = createPort();
+    connect(replay);
+    replay.send({ type: 'start-direct', token });
+    assert.match((await replay.next('error')).message, /\[IMPORT_HANDOFF\]/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('transfers the selected extensionless MP4 to the editor', async () => {
+  const originalFetch = globalThis.fetch;
+  const token = '22222222-2222-4222-8222-222222222222';
+  allowed = true;
+  session[`import:${token}`] = 'https://cdn.example/video?id=1';
+  globalThis.fetch = async () => new Response('test', { headers: { 'content-type': 'video/mp4', 'content-length': '4' } });
+  try {
+    const port = createPort();
+    connect(port);
+    port.send({ type: 'start-direct', token });
+    assert.equal((await port.next('start')).name, 'onboard-video.mp4');
+    assert.equal(Buffer.from((await port.next('chunk')).data, 'base64').toString(), 'test');
+    port.send({ type: 'ack' });
+    await port.next('done');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test('streams bounded chunks only after acknowledgements', async () => {

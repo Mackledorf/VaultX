@@ -14,7 +14,7 @@
 * { box-sizing: border-box; }
 body { width: 360px; max-height: 600px; margin: 0; background: #202224; }
 button { font: inherit; }
-.popup { display: grid; max-height: 600px; grid-template-rows: auto auto auto auto minmax(0, 1fr) auto; gap: 12px; padding: 16px; }
+.popup { display: grid; max-height: 600px; grid-template-rows: auto auto auto auto auto minmax(0, 1fr) auto; gap: 12px; padding: 16px; }
 .popup-header { display: grid; gap: 5px; }
 .brand { color: #f0f1f1; font-size: 15px; font-weight: 700; letter-spacing: .08em; }
 h1 { margin: 0; color: #e7e8e9; font-size: 13px; font-weight: 500; }
@@ -33,4 +33,5 @@ h1 { margin: 0; color: #e7e8e9; font-size: 13px; font-weight: 500; }
 .candidate-meta { display: flex; flex-wrap: wrap; gap: 5px 9px; color: var(--muted); font-size: 9px; line-height: 1.4; }
 .candidate-host { overflow: hidden; max-width: 100%; text-overflow: ellipsis; white-space: nowrap; }
 .open-button { justify-self: start; min-height: 32px; font-size: 10px; }
+.candidate-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 footer { border-top: 1px solid var(--line); color: var(--muted); padding-top: 9px; font-size: 9px; line-height: 1.5; }

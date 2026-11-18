@@ -1,10 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Onboard Video Source",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Find video sources and import supported public posts into Onboard.",
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "scripting", "storage", "webRequest", "downloads"],
   "optional_host_permissions": [
+    "<all_urls>",
     "https://cdn.syndication.twimg.com/*",
     "https://video.twimg.com/*",
     "https://api.redgifs.com/*",

@@ -11,13 +11,13 @@
     try {
       port = chrome.runtime.connect({ name: 'onboard-share-import' });
     } catch {
-      channel.postMessage({ type: 'error', message: 'The Onboard extension is unavailable. Reload the page and try again.' });
+      channel.postMessage({ type: 'error', message: '[IMPORT_BRIDGE] The Onboard extension is unavailable. Reload the page and try again.' });
       channel.close();
       return;
     }
     port.onMessage.addListener((message) => channel.postMessage(message));
     port.onDisconnect.addListener(() => {
-      channel.postMessage({ type: 'error', message: 'The Onboard extension disconnected during import.' });
+      channel.postMessage({ type: 'error', message: '[IMPORT_BRIDGE] The Onboard extension disconnected during import.' });
       channel.close();
     });
     channel.onmessage = (message) => {

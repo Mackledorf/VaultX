@@ -57,6 +57,19 @@ test('rejects non-MP4 responses', async () => {
   }
 });
 
+test('rejects partial responses instead of importing truncated video', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('partial', { status: 206, headers: { 'content-type': 'video/mp4' } });
+  try {
+    await assert.rejects(
+      fetchRemoteMp4(new URL('https://cdn.example/clip.mp4'), () => {}, new AbortController().signal),
+      /\[URL_PARTIAL\]/,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('reports a cross-origin fetch failure with the local-file fallback', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => {

@@ -13,13 +13,14 @@
         <h1>Video sources</h1>
       </header>
       <button id="scan" class="scan-button" type="button">Scan this page</button>
+      <button id="stop-scan" class="scan-button" type="button">Stop observing this tab</button>
       <div class="permissions">
         <button id="enable-x" class="permission-button" type="button">Enable X imports</button>
         <button id="enable-redgifs" class="permission-button" type="button">Enable Redgifs imports</button>
       </div>
-      <p id="status" class="status" role="status" aria-live="polite">Scanning active page…</p>
+      <p id="status" class="status" role="status" aria-live="polite">Select Scan to find MP4s.</p>
       <ol id="candidates" class="candidate-list" aria-label="Detected MP4 sources"></ol>
-      <footer>Enable a site to import its public post URLs in Onboard. Page scanning finds direct MP4s only.</footer>
+      <footer>Scanning observes this tab's video requests until stopped or the tab closes. Play or reload the video, then scan again. Streaming manifests and protected media are not supported.</footer>
     </main>
     <script type="module" src="popup.js"></script>
   </body>

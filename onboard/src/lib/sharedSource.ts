@@ -14,6 +14,22 @@ export function fetchSharedPost(
   onProgress: (progress: RemoteSourceProgress) => void,
   signal: AbortSignal,
 ): Promise<File> {
+  return fetchFromExtension({ type: 'start', url: url.href }, onProgress, signal);
+}
+
+export function fetchExtensionMp4(
+  token: string,
+  onProgress: (progress: RemoteSourceProgress) => void,
+  signal: AbortSignal,
+): Promise<File> {
+  return fetchFromExtension({ type: 'start-direct', token }, onProgress, signal);
+}
+
+function fetchFromExtension(
+  request: { type: 'start'; url: string } | { type: 'start-direct'; token: string },
+  onProgress: (progress: RemoteSourceProgress) => void,
+  signal: AbortSignal,
+): Promise<File> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
       reject(new DOMException('Import cancelled.', 'AbortError'));
@@ -25,7 +41,7 @@ export function fetchSharedPost(
     let loaded = 0;
     let total: number | null = null;
     let finished = false;
-    const timeout = window.setTimeout(() => fail(new Error('Install or reload the Onboard browser extension to import shared post URLs.')), 2000);
+    const timeout = window.setTimeout(() => fail(new Error('[IMPORT_BRIDGE] Install or reload the Onboard browser extension, then reload Onboard.')), 2000);
 
     function cleanup() {
       window.clearTimeout(timeout);
@@ -51,7 +67,7 @@ export function fetchSharedPost(
       try {
         if (message.type === 'ready') {
           window.clearTimeout(timeout);
-          channel.port1.postMessage({ type: 'start', url: url.href });
+          channel.port1.postMessage(request);
         } else if (message.type === 'start' && 'name' in message && typeof message.name === 'string') {
           fileName = message.name;
           total = 'total' in message && typeof message.total === 'number' && message.total > 0 ? message.total : null;
