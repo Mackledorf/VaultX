@@ -5,7 +5,7 @@ import { createLivePreview } from '../lib/livePreview';
 import { getPlaybackTransition } from '../lib/playback';
 import { buildPreviewTransferTable, getAdjustmentRange, getColorTransform, getEditedDuration, isTimeInSegments, preflightExport, validateSourceDimensions } from '../lib/recipe';
 import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
-import { fetchRemoteSourceWithExtension, fetchSharedPost, isSharedPostUrl } from '../lib/sharedSource';
+import { fetchSharedPost, isSharedPostUrl } from '../lib/sharedSource';
 import { convertGifToMp4 } from '../lib/sourcePreparation';
 import { stitchVideos } from '../lib/stitch';
 import { isGifFile, isSupportedVideoFile } from '../lib/videoSource';
@@ -689,16 +689,6 @@ export function OnboardEditor() {
         setRemoteSourceProgress({ ...progress, fileName: pathName });
       }
     }, controller.signal)
-      .catch(async (sourceError: unknown) => {
-        if (isSharedPostUrl(sourceUrl) || controller.signal.aborted) throw sourceError;
-        if (!(sourceError instanceof Error)) throw sourceError;
-        if (!/\bHTTP (401|403)\b|cross-origin access \(CORS\)/.test(sourceError.message)) throw sourceError;
-        return fetchRemoteSourceWithExtension(sourceUrl, (progress) => {
-          if (remoteImportController.current === controller) {
-            setRemoteSourceProgress({ ...progress, fileName: pathName });
-          }
-        }, controller.signal);
-      })
       .then((sourceFile) => {
         if (remoteImportController.current !== controller) return;
         remoteImportController.current = null;

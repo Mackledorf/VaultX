@@ -5,7 +5,6 @@
   "description": "Find video sources and import supported public posts into Onboard.",
   "permissions": ["activeTab", "scripting"],
   "optional_host_permissions": [
-    "<all_urls>",
     "https://cdn.syndication.twimg.com/*",
     "https://video.twimg.com/*",
     "https://api.redgifs.com/*",

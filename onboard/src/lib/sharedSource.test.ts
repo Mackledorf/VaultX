@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fetchRemoteSourceWithExtension, fetchSharedPost, isSharedPostUrl } from './sharedSource';
+import { fetchSharedPost, isSharedPostUrl } from './sharedSource';
 
 function installWindow(onConnect: (port: MessagePort) => void) {
   const previous = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -80,38 +80,5 @@ test('aborts an in-flight import and reports unavailable extensions', async () =
     );
   } finally {
     restoreMissing();
-  }
-});
-
-test('imports direct MP4 URLs through the extension bridge', async () => {
-  const progress: Array<{ loaded: number; total: number | null }> = [];
-  let connection: MessagePort | undefined;
-  const restore = installWindow((port) => {
-    connection = port;
-    port.onmessage = (event: MessageEvent<{ type: string; url?: string }>) => {
-      if (event.data.type === 'start-direct') {
-        assert.equal(event.data.url, 'https://cdn.example/clip.mp4');
-        port.postMessage({ type: 'start', name: 'clip.mp4', total: 4 });
-        port.postMessage({ type: 'chunk', data: btoa('test') });
-      } else if (event.data.type === 'ack') {
-        port.postMessage({ type: 'done' });
-      } else if (event.data.type === 'close') {
-        port.close();
-      }
-    };
-    port.postMessage({ type: 'ready' });
-  });
-  try {
-    const file = await fetchRemoteSourceWithExtension(
-      new URL('https://cdn.example/clip.mp4'),
-      (value) => progress.push(value),
-      new AbortController().signal,
-    );
-    assert.equal(file.name, 'clip.mp4');
-    assert.equal(await file.text(), 'test');
-    assert.deepEqual(progress, [{ loaded: 0, total: 4 }, { loaded: 4, total: 4 }]);
-  } finally {
-    connection?.close();
-    restore();
   }
 });
