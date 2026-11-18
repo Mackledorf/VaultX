@@ -67,7 +67,8 @@ function renderCandidates(candidates) {
     const metadata = document.createElement('div');
     metadata.className = 'candidate-meta';
     const quality = document.createElement('span');
-    quality.textContent = candidate.kind === 'shared-post' ? 'Shared video' : formatQuality(candidate);
+    quality.textContent = candidate.kind === 'shared-post' ? 'Shared video'
+      : candidate.kind === 'hls' ? 'Stream (audio may be separate)' : formatQuality(candidate);
     metadata.append(quality);
     if (candidate.duration > 0) {
       const duration = document.createElement('span');
@@ -98,7 +99,7 @@ function renderCandidates(candidates) {
       const token = crypto.randomUUID();
       const key = `import:${token}`;
       try {
-        await chrome.storage.session.set({ [key]: candidate.url });
+        await chrome.storage.session.set({ [key]: candidate.kind === 'hls' ? { kind: 'hls', url: candidate.url } : candidate.url });
         const target = new URL(ONBOARD_URL);
         target.hash = new URLSearchParams({ import: token }).toString();
         await chrome.tabs.create({ url: target.href });
@@ -126,7 +127,7 @@ function renderCandidates(candidates) {
     const actions = document.createElement('div');
     actions.className = 'candidate-actions';
     actions.append(openButton);
-    if (candidate.kind !== 'shared-post') actions.append(downloadButton);
+    if (!['shared-post', 'hls'].includes(candidate.kind)) actions.append(downloadButton);
     item.append(heading, metadata, actions);
     candidateList.append(item);
   }

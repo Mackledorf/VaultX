@@ -70,6 +70,54 @@ test('finds and deduplicates direct MP4 candidates while excluding streams', () 
   }
 });
 
+test('discovers and deduplicates X status links while preserving selected media', () => {
+  const anchor = (href) => ({ href, textContent: '', getAttribute: () => null });
+  const restore = installGlobals({
+    document: {
+      title: 'Post',
+      querySelectorAll(selector) {
+        if (selector === 'a[href]') return [
+          anchor('https://twitter.com/user/status/123?ref=share'),
+          anchor('https://x.com/other/status/123'),
+          anchor('https://x.com/user/status/123/video/2'),
+          anchor('https://x.com.evil.example/user/status/456'),
+        ];
+        if (selector === 'iframe[src]') return [
+          { src: 'https://mobile.twitter.com/user/status/456' },
+          { src: 'https://platform.twitter.com/embed/Tweet.html?id=789' },
+        ];
+        return [];
+      },
+    },
+    location: { href: 'https://example.com/' },
+    performance: { getEntriesByType: () => [] },
+  });
+
+  try {
+    assert.deepEqual(scanVideoSources().map((candidate) => candidate.url).sort(), [
+      'https://x.com/i/web/status/123',
+      'https://x.com/i/web/status/123/video/2',
+      'https://x.com/i/web/status/456',
+      'https://x.com/i/web/status/789',
+    ]);
+  } finally {
+    restore();
+  }
+});
+
+test('does not present fragmented-media initialization files as complete videos', () => {
+  const restore = installGlobals({
+    document: { title: 'Post', querySelectorAll: () => [] },
+    location: { href: 'https://x.com/' },
+    performance: { getEntriesByType: () => [{ name: 'https://video.twimg.com/ext/pu/vid/avc1/0/0/320x566/init.mp4' }] },
+  });
+  try {
+    assert.deepEqual(scanVideoSources(), []);
+  } finally {
+    restore();
+  }
+});
+
 test('includes MP4 sources identified by MIME type without an mp4 path suffix', () => {
   const sourceUrl = 'https://cdn.example/media?id=42';
   const source = {

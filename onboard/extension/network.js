@@ -8,9 +8,16 @@ export function candidateFromResponse(details) {
   }
   if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return null;
   const path = url.pathname.toLowerCase();
-  if (/\.(m3u8|mpd|m4s|ts|webm|mov)$/.test(path)) return null;
   const contentType = details.responseHeaders?.find((header) => header.name.toLowerCase() === 'content-type')?.value
     ?.split(';', 1)[0].trim().toLowerCase();
+  if (url.protocol === 'https:' && url.hostname === 'video.twimg.com' && !url.port && details.statusCode === 200
+      && (path.endsWith('.m3u8') || /^(application|audio)\/(?:x-mpegurl|vnd\.apple\.mpegurl)$/.test(contentType || ''))) {
+    url.hash = '';
+    const name = url.pathname.split('/').filter(Boolean).slice(-3).join('/') || 'Observed stream';
+    return { kind: 'hls', url: url.href, name, host: url.host, width: 0, height: 0, duration: 0 };
+  }
+  if (url.hostname === 'video.twimg.com' && /\/(?:vid|aud)\/[^/]+\/\d+\/\d+\//.test(path)) return null;
+  if (/\.(m3u8|mpd|m4s|ts|webm|mov)$/.test(path)) return null;
   if (!path.endsWith('.mp4') && contentType !== 'video/mp4') return null;
   url.hash = '';
   let name = url.pathname.split('/').filter(Boolean).at(-1) || 'video.mp4';

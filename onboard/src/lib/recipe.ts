@@ -109,7 +109,19 @@ export function preflightExport(
       throw new Error('A section crop is too small for the source video. Choose a larger crop before exporting.');
     }
   }
+  validateSectionCropRatios(recipe);
   return recipe;
+}
+
+function validateSectionCropRatios(recipe: VideoEditRecipe) {
+  const firstCrop = recipe.segments[0]?.crop ?? recipe.crop;
+  const ratio = firstCrop.width / firstCrop.height;
+  for (const segment of recipe.segments) {
+    const crop = segment.crop ?? recipe.crop;
+    if (Math.abs(crop.width / crop.height - ratio) > 1e-8 * Math.max(1, ratio)) {
+      throw new Error('All section crops must have the same aspect ratio.');
+    }
+  }
 }
 
 function normalizeCrop(value: unknown): VideoEditRecipe['crop'] {
@@ -193,6 +205,7 @@ export function buildMp4Filter(recipe: VideoEditRecipe, hasAudio = false, separa
 }
 
 function buildVideoSegmentFilters(recipe: VideoEditRecipe, separateInputs: boolean, sourceSize?: { width: number; height: number }) {
+  validateSectionCropRatios(recipe);
   const { adjustments, rotation } = recipe;
   const transform = getColorTransform(adjustments);
   const unsharpAmount = (adjustments.sharpness + adjustments.definition * 0.7) / 100;
@@ -241,8 +254,7 @@ function buildVideoSegmentFilters(recipe: VideoEditRecipe, separateInputs: boole
       'fps=30',
       ...frameFilters,
       ...(hasDifferentCrops && output ? [
-        `scale=${output.width}:${output.height}:force_original_aspect_ratio=decrease:force_divisible_by=2`,
-        `pad=${output.width}:${output.height}:(ow-iw)/2:(oh-ih)/2:black`,
+        `scale=${output.width}:${output.height}`,
         'setsar=1',
       ] : []),
     ].join(',')}[segment${index}]`;

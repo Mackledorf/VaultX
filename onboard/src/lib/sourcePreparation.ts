@@ -3,6 +3,45 @@ import { fetchFile } from '@ffmpeg/util';
 import coreURL from '@ffmpeg/core?url';
 import wasmURL from '@ffmpeg/core/wasm?url';
 import { describeFfmpegFailure } from './exportDiagnostics';
+import type { ImportedStream } from './sharedSource';
+import { buildStreamRemuxArgs } from './streamRemux';
+
+export async function remuxStreamToMp4(source: ImportedStream, signal: AbortSignal) {
+  if (signal.aborted) throw new DOMException('Stream preparation cancelled.', 'AbortError');
+  const ffmpeg = new FFmpeg();
+  const logs: string[] = [];
+  const onAbort = () => ffmpeg.terminate();
+  const onLog = ({ message }: { message: string }) => {
+    logs.push(message);
+    if (logs.length > 200) logs.shift();
+  };
+  signal.addEventListener('abort', onAbort, { once: true });
+  ffmpeg.on('log', onLog);
+  try {
+    await ffmpeg.load({ coreURL, wasmURL });
+    if (signal.aborted) throw new DOMException('Stream preparation cancelled.', 'AbortError');
+    await ffmpeg.writeFile('video-input', await fetchFile(source.video));
+    if (source.audio) await ffmpeg.writeFile('audio-input', await fetchFile(source.audio));
+    if (signal.aborted) throw new DOMException('Stream preparation cancelled.', 'AbortError');
+    const exitCode = await ffmpeg.exec(buildStreamRemuxArgs(Boolean(source.audio)));
+    if (signal.aborted) throw new DOMException('Stream preparation cancelled.', 'AbortError');
+    if (exitCode !== 0) throw new Error(describeFfmpegFailure('mp4', exitCode, logs));
+    const output = await ffmpeg.readFile('output.mp4');
+    if (typeof output === 'string' || output.byteLength < 12 || String.fromCharCode(...output.subarray(4, 8)) !== 'ftyp') {
+      throw new Error('Stream preparation did not produce a valid MP4 video.');
+    }
+    const bytes = new Uint8Array(output.byteLength);
+    bytes.set(output);
+    return new File([bytes], source.name, { type: 'video/mp4' });
+  } catch (error) {
+    if (signal.aborted) throw new DOMException('Stream preparation cancelled.', 'AbortError');
+    throw new Error(`[HLS_REMUX] Could not prepare this stream locally. ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+    ffmpeg.off('log', onLog);
+    ffmpeg.terminate();
+  }
+}
 
 export async function convertGifToMp4(
   file: File,

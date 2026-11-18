@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Onboard Video Source",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Find video sources and import supported public posts into Onboard.",
   "permissions": ["activeTab", "scripting", "storage", "webRequest", "downloads"],
   "optional_host_permissions": [
@@ -25,7 +25,7 @@
     "run_at": "document_start"
   }],
   "action": {
-    "default_title": "Find MP4s for Onboard",
+    "default_title": "Find video sources for Onboard",
     "default_popup": "popup.html"
   }
 }

@@ -19,6 +19,17 @@ test('recognizes successful MP4 responses, including extensionless URLs', () => 
   }
 });
 
+test('recognizes observed playlists only on the permitted media host', () => {
+  const response = { tabId: 7, method: 'GET', statusCode: 200, responseHeaders: [] };
+  assert.equal(candidateFromResponse({ ...response, url: 'https://video.twimg.com/master.m3u8' })?.kind, 'hls');
+  assert.equal(candidateFromResponse({ ...response, url: 'https://video.twimg.com/playlist?id=1', responseHeaders: [
+    { name: 'Content-Type', value: 'application/vnd.apple.mpegurl' },
+  ] })?.kind, 'hls');
+  assert.equal(candidateFromResponse({ ...response, url: 'https://evil.example/master.m3u8' }), null);
+  assert.equal(candidateFromResponse({ ...response, url: 'https://video.twimg.com/master.m3u8', statusCode: 206 }), null);
+  assert.equal(candidateFromResponse({ ...response, url: 'https://video.twimg.com/ext/pu/vid/avc1/0/0/320x566/init.mp4' }), null);
+});
+
 test('observes only the requested tab and clears results on navigation or stop', async () => {
   const previous = globalThis.chrome;
   const storage = {};

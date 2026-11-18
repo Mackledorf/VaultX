@@ -1,6 +1,7 @@
 import { fetchSharedVideo, parseSharedUrl, resolveSharedVideo, SITE_PERMISSIONS } from './resolver.js';
 import { installNetworkScanner } from './network.js';
 import { connectRangeSource } from './rangeSession.js';
+import { fetchHlsResource, resolveXPlaylist } from './hls.js';
 
 installNetworkScanner();
 const claimedTokens = new Set();
@@ -33,15 +34,20 @@ async function claimSelectedUrl(token) {
     const key = `import:${token}`;
     const stored = await chrome.storage.session.get(key);
     await chrome.storage.session.remove(key);
-    if (typeof stored[key] !== 'string') throw new Error('[IMPORT_HANDOFF] This import has expired. Select the source again.');
-    const url = new URL(stored[key]);
+    const selected = stored[key];
+    const kind = typeof selected === 'string' ? 'mp4' : selected?.kind === 'hls' ? 'hls' : null;
+    if (!kind || (kind === 'hls' && typeof selected.url !== 'string')) throw new Error('[IMPORT_HANDOFF] This import has expired. Select the source again.');
+    const url = new URL(kind === 'mp4' ? selected : selected.url);
     if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
       throw new Error('[IMPORT_URL] Only HTTP(S) URLs without credentials are supported.');
     }
     if (!await chrome.permissions.contains({ origins: ['<all_urls>'] })) {
       throw new Error('[IMPORT_PERMISSION] Allow site access in the extension and scan again.');
     }
-    return url;
+    if (kind === 'hls' && (url.protocol !== 'https:' || url.hostname !== 'video.twimg.com' || url.port)) {
+      throw new Error('[HLS_URL] This stream is not on the permitted media host.');
+    }
+    return { url, kind };
   } finally {
     claimedTokens.delete(token);
   }
@@ -54,7 +60,11 @@ chrome.runtime.onConnect.addListener((port) => {
     return;
   }
   if (port.name === 'onboard-range-import') {
-    connectRangeSource(port, claimSelectedUrl, encodeBytes);
+    connectRangeSource(port, async (token) => {
+      const selected = await claimSelectedUrl(token);
+      if (selected.kind !== 'mp4') throw new Error('[IMPORT_FORMAT] Range loading requires an MP4.');
+      return selected.url;
+    }, encodeBytes);
     return;
   }
   const controller = new AbortController();
@@ -83,7 +93,12 @@ chrome.runtime.onConnect.addListener((port) => {
 
   async function importDirectVideo(token) {
     try {
-      const url = await claimSelectedUrl(token);
+      const selected = await claimSelectedUrl(token);
+      const url = selected.url;
+      if (selected.kind === 'hls') {
+        await transferHls(url.href, 'onboard-video.mp4');
+        return;
+      }
       let response;
       try {
         response = await fetch(url.href, { signal: controller.signal, credentials: 'omit', referrerPolicy: 'no-referrer' });
@@ -122,8 +137,12 @@ chrome.runtime.onConnect.addListener((port) => {
       if (!allowed) {
         throw new Error(`Enable ${post.site === 'x' ? 'X' : 'Redgifs'} imports in the Onboard extension, then try again.`);
       }
-      const url = await resolveSharedVideo(post, controller.signal);
-      const response = await fetchSharedVideo(url, controller.signal);
+      const source = await resolveSharedVideo(post, controller.signal);
+      if (source.kind === 'hls') {
+        await transferHls(source.url, `${post.site}-${post.id}.mp4`);
+        return;
+      }
+      const response = await fetchSharedVideo(source.url, controller.signal);
       await transferResponse(response, `${post.site}-${post.id}.mp4`);
     } catch (error) {
       if (!controller.signal.aborted) port.postMessage({ type: 'error', message: `[POST_IMPORT] ${error instanceof Error ? error.message : 'Could not import this post.'}` });
@@ -134,6 +153,13 @@ chrome.runtime.onConnect.addListener((port) => {
     if (!response.body) throw new Error('[IMPORT_BODY] The video response did not contain a readable file.');
     const length = Number(response.headers.get('content-length'));
     port.postMessage({ type: 'start', total: Number.isFinite(length) && length > 0 ? length : null, name });
+    const loaded = await transferBody(response);
+    if (controller.signal.aborted) return;
+    if (!loaded) throw new Error('[IMPORT_EMPTY] The video source returned an empty file.');
+    port.postMessage({ type: 'done' });
+  }
+
+  async function transferBody(response) {
     const reader = response.body.getReader();
     let loaded = 0;
     while (!controller.signal.aborted) {
@@ -147,7 +173,7 @@ chrome.runtime.onConnect.addListener((port) => {
       if (result.done) break;
       const chunk = result.value;
       for (let offset = 0; offset < chunk.length; offset += 65536) {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted) return loaded;
         const bytes = chunk.subarray(offset, offset + 65536);
         loaded += bytes.length;
         await new Promise((resolve) => {
@@ -156,8 +182,23 @@ chrome.runtime.onConnect.addListener((port) => {
         });
       }
     }
+    return loaded;
+  }
+
+  async function transferHls(url, name) {
+    const tracks = await resolveXPlaylist(url, controller.signal);
     if (controller.signal.aborted) return;
-    if (!loaded) throw new Error('[IMPORT_EMPTY] The video source returned an empty file.');
+    port.postMessage({ type: 'start', format: 'hls', total: null, name });
+    for (const track of tracks) {
+      port.postMessage({ type: 'track-start', track: track.name });
+      for (const resource of track.resources) {
+        const response = await fetchHlsResource(resource, controller.signal);
+        const loaded = await transferBody(response);
+        if (controller.signal.aborted) return;
+        if (!loaded) throw new Error('[HLS_EMPTY] A stream resource was empty.');
+      }
+      port.postMessage({ type: 'track-end', track: track.name });
+    }
     port.postMessage({ type: 'done' });
   }
 });

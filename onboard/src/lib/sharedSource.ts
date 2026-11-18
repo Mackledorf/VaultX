@@ -1,5 +1,7 @@
 import type { RemoteSourceProgress } from './remoteSource';
 
+export type ImportedStream = { kind: 'hls'; name: string; video: File; audio: File | null };
+
 const SHARED_HOSTS = new Set([
   'x.com', 'www.x.com', 'twitter.com', 'www.twitter.com', 'mobile.twitter.com',
   'redgifs.com', 'www.redgifs.com',
@@ -13,7 +15,7 @@ export function fetchSharedPost(
   url: URL,
   onProgress: (progress: RemoteSourceProgress) => void,
   signal: AbortSignal,
-): Promise<File> {
+): Promise<File | ImportedStream> {
   return fetchFromExtension({ type: 'start', url: url.href }, onProgress, signal);
 }
 
@@ -21,7 +23,7 @@ export function fetchExtensionMp4(
   token: string,
   onProgress: (progress: RemoteSourceProgress) => void,
   signal: AbortSignal,
-): Promise<File> {
+): Promise<File | ImportedStream> {
   return fetchFromExtension({ type: 'start-direct', token }, onProgress, signal);
 }
 
@@ -29,14 +31,17 @@ function fetchFromExtension(
   request: { type: 'start'; url: string } | { type: 'start-direct'; token: string },
   onProgress: (progress: RemoteSourceProgress) => void,
   signal: AbortSignal,
-): Promise<File> {
+): Promise<File | ImportedStream> {
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
       reject(new DOMException('Import cancelled.', 'AbortError'));
       return;
     }
     let channel: MessageChannel | null = null;
-    const chunks: ArrayBuffer[] = [];
+    let chunks: ArrayBuffer[] = [];
+    let stream = false;
+    let activeTrack: 'video' | 'audio' | null = null;
+    const tracks: { video: File | null; audio: File | null } = { video: null, audio: null };
     let fileName = '';
     let loaded = 0;
     let total: number | null = null;
@@ -87,9 +92,20 @@ function fetchFromExtension(
             attempt.port1.postMessage(request);
           } else if (message.type === 'start' && 'name' in message && typeof message.name === 'string') {
             fileName = message.name;
+            stream = 'format' in message && message.format === 'hls';
             total = 'total' in message && typeof message.total === 'number' && message.total > 0 ? message.total : null;
             onProgress({ loaded, total });
-          } else if (message.type === 'chunk' && 'data' in message && typeof message.data === 'string' && fileName) {
+          } else if (message.type === 'track-start' && stream && !activeTrack && 'track' in message
+              && (message.track === 'video' || message.track === 'audio') && !tracks[message.track]) {
+            activeTrack = message.track;
+            chunks = [];
+          } else if (message.type === 'track-end' && stream && activeTrack && 'track' in message
+              && message.track === activeTrack && chunks.length) {
+            tracks[activeTrack] = new File(chunks, `${activeTrack}.mp4`);
+            chunks = [];
+            activeTrack = null;
+          } else if (message.type === 'chunk' && 'data' in message && typeof message.data === 'string'
+              && fileName && (!stream || activeTrack)) {
             const binary = atob(message.data);
             const bytes = new Uint8Array(binary.length);
             for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
@@ -97,10 +113,11 @@ function fetchFromExtension(
             loaded += bytes.length;
             onProgress({ loaded, total });
             attempt.port1.postMessage({ type: 'ack' });
-          } else if (message.type === 'done' && fileName && loaded > 0) {
+          } else if (message.type === 'done' && fileName && loaded > 0 && (!stream || (tracks.video && !activeTrack))) {
             finished = true;
             cleanup();
-            resolve(new File(chunks, fileName, { type: 'video/mp4' }));
+            if (stream && tracks.video) resolve({ kind: 'hls', name: fileName, video: tracks.video, audio: tracks.audio });
+            else resolve(new File(chunks, fileName, { type: 'video/mp4' }));
           } else if (message.type === 'error') {
             fail(new Error('message' in message && typeof message.message === 'string' ? message.message : 'Could not import this post.'));
           } else if (message.type !== 'ready') {

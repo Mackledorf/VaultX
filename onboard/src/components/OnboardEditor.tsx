@@ -1,6 +1,6 @@
 import { type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
 import { ArrowDownUp, ChevronDown, CircleDot, Combine, Contrast, Copy, Crop, Download, Droplets, Focus, Link2, List, ListRestart, Menu, Moon, Palette, Pause, Play, RefreshCw, RotateCw, ScanLine, Scissors, SlidersHorizontal, Sparkles, Sun, SunDim, SunMedium, Trash2, Upload, Video as VideoIcon, Waves, X } from 'lucide-react';
-import { resizeCrop, type CropHandle } from '../lib/crop';
+import { fitCropToRatio, resizeCrop, type CropHandle } from '../lib/crop';
 import { exportMp4 as exportMp4Locally } from '../lib/editor';
 import { exportFileName } from '../lib/exportName';
 import { isStillImage, prepareImageSequence } from '../lib/imageSequence';
@@ -8,8 +8,8 @@ import { createLivePreview } from '../lib/livePreview';
 import { getPlaybackTransition } from '../lib/playback';
 import { buildPreviewTransferTable, getAdjustmentRange, getColorTransform, getEditedDuration, getExportDimensions, isTimeInSegments, preflightExport, validateSourceDimensions } from '../lib/recipe';
 import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
-import { fetchExtensionMp4, fetchSharedPost, isSharedPostUrl } from '../lib/sharedSource';
-import { convertGifToMp4 } from '../lib/sourcePreparation';
+import { fetchExtensionMp4, fetchSharedPost, isSharedPostUrl, type ImportedStream } from '../lib/sharedSource';
+import { convertGifToMp4, remuxStreamToMp4 } from '../lib/sourcePreparation';
 import { stitchVideos } from '../lib/stitch';
 import { addTimelineClip, zoomTimeline } from '../lib/timeline';
 import { isGifFile, isSupportedVideoFile } from '../lib/videoSource';
@@ -59,6 +59,7 @@ const ADJUSTMENT_ICONS = {
 
 type CropRect = VideoEditRecipe['crop'];
 type VideoSegment = VideoEditRecipe['segments'][number];
+type CropBaseline = { standardSegments: VideoSegment[]; reductionSegments: VideoSegment[]; fallbackCrop: CropRect };
 type RemoteSourceProgressState = RemoteSourceProgress & { fileName: string };
 type EditorSnapshot = {
   standardSegments: VideoSegment[];
@@ -115,9 +116,11 @@ export function OnboardEditor() {
   const dragRef = useRef<{
     handle: CropHandle;
     crop: CropRect;
+    lastCrop: CropRect;
     rect: DOMRect;
     startX: number;
     startY: number;
+    baseline: CropBaseline;
   } | null>(null);
   const frameDurationRef = useRef(DEFAULT_FRAME_DURATION);
   const pendingPlaybackTransitionRef = useRef<{ resume: boolean } | null>(null);
@@ -409,11 +412,8 @@ export function OnboardEditor() {
         const output = getExportDimensions({ segments, rotation, crop: fallbackCrop, adjustments: {} }, dimensions.width, dimensions.height);
         canvasWidth = Math.max(2, output.width);
         canvasHeight = Math.max(2, output.height);
-        frameWidth = Math.max(2, Math.floor(frameWidth / 2) * 2);
-        frameHeight = Math.max(2, Math.floor(frameHeight / 2) * 2);
-        const fit = Math.min(canvasWidth / frameWidth, canvasHeight / frameHeight);
-        frameWidth *= fit;
-        frameHeight *= fit;
+        frameWidth = canvasWidth;
+        frameHeight = canvasHeight;
       }
       const scale = Math.min(bounds.width / canvasWidth, bounds.height / canvasHeight);
       const width = frameWidth * scale;
@@ -882,7 +882,7 @@ export function OnboardEditor() {
         setRemoteSourceProgress({ ...progress, fileName: pathName });
       }
     };
-    let importPromise: Promise<File>;
+    let importPromise: Promise<File | ImportedStream>;
     if (token) {
       importPromise = fetchExtensionMp4(token, onProgress, controller.signal);
     } else if (sourceUrl) {
@@ -893,6 +893,13 @@ export function OnboardEditor() {
       throw new Error('A source URL or extension token is required.');
     }
     void importPromise
+      .then(async (source) => {
+        if (source instanceof File) return source;
+        if (remoteImportController.current === controller) {
+          setRemoteSourceProgress((current) => current ? { ...current, fileName: 'stream (preparing locally)' } : current);
+        }
+        return remuxStreamToMp4(source, controller.signal);
+      })
       .then((sourceFile) => {
         if (remoteImportController.current !== controller) return;
         remoteImportController.current = null;
@@ -946,16 +953,20 @@ export function OnboardEditor() {
     return { x: 0, y: (1 - height) / 2, width: 1, height };
   }
 
-  function updateSelectedCrop(nextCrop: CropRect, nextAspectRatio: number | null) {
+  function updateSelectedCrop(nextCrop: CropRect, nextAspectRatio: number | null, baseline?: CropBaseline) {
     const index = cropSegmentIndex >= 0 ? cropSegmentIndex : selectedSegmentIndex;
-    if (!segments[index]) {
-      setFallbackCrop(nextCrop);
-      setFallbackCropAspectRatio(nextAspectRatio);
-      return;
-    }
-    setSegments((current) => current.map((segment, segmentIndex) => (
-      segmentIndex === index ? { ...segment, crop: nextCrop, cropAspectRatio: nextAspectRatio } : segment
-    )));
+    const ratio = nextCrop.width / nextCrop.height;
+    const updateSegments = (current: VideoSegment[], active: boolean, original?: VideoSegment[]) => current.map((segment, segmentIndex) => ({
+      ...segment,
+      crop: active && segmentIndex === index
+        ? nextCrop
+        : fitCropToRatio(original ? original[segmentIndex]?.crop ?? baseline?.fallbackCrop ?? fallbackCrop : segment.crop ?? fallbackCrop, ratio),
+      cropAspectRatio: nextAspectRatio,
+    }));
+    setStandardSegments((current) => updateSegments(current, !reductionMode, baseline?.standardSegments));
+    setReductionSegments((current) => updateSegments(current, reductionMode, baseline?.reductionSegments));
+    setFallbackCrop(segments[index] ? fitCropToRatio(baseline?.fallbackCrop ?? fallbackCrop, ratio) : nextCrop);
+    setFallbackCropAspectRatio(nextAspectRatio);
   }
 
   function setCropAspect(aspectRatio: number) {
@@ -982,12 +993,18 @@ export function OnboardEditor() {
     recordEdit();
     setRotation(nextRotation);
     if (dimensions.width && dimensions.height) {
+      const frameAspectRatio = nextRotation % 180
+        ? dimensions.height / dimensions.width
+        : dimensions.width / dimensions.height;
       const rotateLockedCrops = (items: VideoSegment[]) => items.map((segment) => (
-        segment.cropAspectRatio == null ? segment : { ...segment, crop: cropForAspectRatio(segment.cropAspectRatio, nextRotation) }
+        segment.cropAspectRatio == null ? segment : {
+          ...segment,
+          crop: fitCropToRatio(segment.crop ?? fallbackCrop, segment.cropAspectRatio / frameAspectRatio),
+        }
       ));
       setStandardSegments(rotateLockedCrops);
       setReductionSegments(rotateLockedCrops);
-      if (fallbackCropAspectRatio !== null) setFallbackCrop(cropForAspectRatio(fallbackCropAspectRatio, nextRotation));
+      if (fallbackCropAspectRatio !== null) setFallbackCrop(fitCropToRatio(fallbackCrop, fallbackCropAspectRatio / frameAspectRatio));
     }
   }
 
@@ -1671,9 +1688,10 @@ export function OnboardEditor() {
     const dy = (event.clientY - drag.startY) / drag.rect.height;
     const frameAspect = rotation % 180 ? dimensions.height / dimensions.width : dimensions.width / dimensions.height;
     const next = resizeCrop(drag.crop, drag.handle, dx, dy, cropAspectRatio === null ? null : cropAspectRatio / frameAspect);
-    if (next.x === crop.x && next.y === crop.y && next.width === crop.width && next.height === crop.height) return;
+    if (next.x === drag.lastCrop.x && next.y === drag.lastCrop.y && next.width === drag.lastCrop.width && next.height === drag.lastCrop.height) return;
+    drag.lastCrop = next;
     recordEdit();
-    updateSelectedCrop(next, cropAspectRatio);
+    updateSelectedCrop(next, cropAspectRatio, drag.baseline);
   }
 
   function clearCropDrag() {
@@ -2451,14 +2469,17 @@ export function OnboardEditor() {
                           if (!frame) return;
                           event.preventDefault();
                           event.stopPropagation();
+                          videoRef.current?.pause();
                           frame.setPointerCapture(event.pointerId);
                           beginEditGesture();
                           dragRef.current = {
                             handle,
                             crop: { ...crop },
+                            lastCrop: { ...crop },
                             rect: frame.getBoundingClientRect(),
                             startX: event.clientX,
                             startY: event.clientY,
+                            baseline: { standardSegments, reductionSegments, fallbackCrop },
                           };
                         }}
                       />
@@ -2912,21 +2933,16 @@ function createTimelineThumbnail(
   thumbnail.height = Math.max(1, Math.round(thumbnailHeight));
   const thumbnailContext = thumbnail.getContext('2d');
   if (!thumbnailContext) throw new Error('The browser could not create a timeline preview.');
-  thumbnailContext.fillStyle = '#000';
-  thumbnailContext.fillRect(0, 0, thumbnail.width, thumbnail.height);
-  const fit = Math.min(thumbnail.width / cropWidth, thumbnail.height / cropHeight);
-  const width = cropWidth * fit;
-  const height = cropHeight * fit;
   thumbnailContext.drawImage(
     oriented,
     cropX,
     cropY,
     cropWidth,
     cropHeight,
-    (thumbnail.width - width) / 2,
-    (thumbnail.height - height) / 2,
-    width,
-    height,
+    0,
+    0,
+    thumbnail.width,
+    thumbnail.height,
   );
   return thumbnail.toDataURL('image/jpeg', 0.78);
 }

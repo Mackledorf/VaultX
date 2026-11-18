@@ -33,13 +33,20 @@ test('opens a discovered embedded post through the existing share-link handoff',
     },
   };
   const opened = [];
+  const stored = {};
   install('document', popupDocument);
   install('location', { href: 'https://www.reddit.com/comments/example' });
   install('performance', { getEntriesByType: () => [] });
   install('chrome', {
     downloads: { onChanged: { addListener() {} } },
     permissions: { async contains() { return true; }, async request() { return true; } },
-    runtime: { async sendMessage() { return { candidates: [] }; } },
+    runtime: { async sendMessage() { return { candidates: [
+      { kind: 'hls', url: 'https://video.twimg.com/master.m3u8', name: 'Stream', host: 'video.twimg.com', width: 0, height: 0, duration: 0 },
+    ] }; } },
+    storage: { session: {
+      async set(value) { Object.assign(stored, value); },
+      async remove(key) { delete stored[key]; },
+    } },
     scripting: {
       async executeScript({ func }) {
         globalThis.document = pageDocument;
@@ -59,7 +66,7 @@ test('opens a discovered embedded post through the existing share-link handoff',
     await import('./popup.js');
     elements.scan.listeners.click();
     while (elements.scan.disabled) await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(elements.candidates.children.length, 1);
+    assert.equal(elements.candidates.children.length, 2);
     const candidate = elements.candidates.children[0];
     const actions = candidate.children[2];
     assert.equal(actions.children.length, 1);
@@ -69,6 +76,11 @@ test('opens a discovered embedded post through the existing share-link handoff',
     assert.equal(target.origin, 'https://mackledorf.github.io');
     const source = new URLSearchParams(target.hash.slice(1)).get('source');
     assert.deepEqual(parseSharedUrl(source), { site: 'redgifs', id: 'example' });
+    const streamActions = elements.candidates.children[1].children[2];
+    assert.equal(streamActions.children.length, 1);
+    await streamActions.children[0].listeners.click();
+    const token = new URLSearchParams(new URL(opened[1]).hash.slice(1)).get('import');
+    assert.deepEqual(stored[`import:${token}`], { kind: 'hls', url: 'https://video.twimg.com/master.m3u8' });
   } finally {
     for (const [name, descriptor] of previous) {
       if (descriptor) Object.defineProperty(globalThis, name, descriptor);

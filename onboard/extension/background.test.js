@@ -133,6 +133,71 @@ test('imports a discovered shared post through the existing resolver', async () 
   }
 });
 
+test('imports a selected HLS master with ordered video and audio resources', async () => {
+  const originalFetch = globalThis.fetch;
+  const token = '44444444-4444-4444-8444-444444444444';
+  allowed = true;
+  session[`import:${token}`] = { kind: 'hls', url: 'https://video.twimg.com/master.m3u8' };
+  const requests = [];
+  const responses = {
+    '/master.m3u8': '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",URI="audio.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=100,AUDIO="a"\nvideo.m3u8',
+    '/video.m3u8': '#EXTM3U\n#EXT-X-MAP:URI="init"\n#EXTINF:1,\nsegment\n#EXT-X-ENDLIST',
+    '/audio.m3u8': '#EXTM3U\n#EXTINF:1,\naudio\n#EXT-X-ENDLIST',
+    '/init': 'init', '/segment': 'video', '/audio': 'audio',
+  };
+  globalThis.fetch = async (url, options) => {
+    requests.push(new URL(url).pathname);
+    assert.equal(options.credentials, 'omit');
+    assert.equal(options.redirect, 'error');
+    return new Response(responses[new URL(url).pathname] ?? '', { status: responses[new URL(url).pathname] ? 200 : 404 });
+  };
+  try {
+    const port = createPort();
+    connect(port);
+    port.send({ type: 'start-direct', token });
+    assert.equal((await port.next('start')).format, 'hls');
+    for (let count = 1; count <= 3; count += 1) {
+      while (port.messages.filter((message) => message.type === 'chunk').length < count) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      port.send({ type: 'ack' });
+    }
+    await port.next('done');
+    assert.deepEqual(port.messages.filter((message) => message.type === 'track-start').map((message) => message.track), ['video', 'audio']);
+    assert.deepEqual(port.messages.filter((message) => message.type === 'chunk').map((message) => Buffer.from(message.data, 'base64').toString()), ['init', 'video', 'audio']);
+    assert.deepEqual(requests, ['/master.m3u8', '/video.m3u8', '/audio.m3u8', '/init', '/segment', '/audio']);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('cancelling an HLS segment fetch stops the import', async () => {
+  const originalFetch = globalThis.fetch;
+  const token = '55555555-5555-4555-8555-555555555555';
+  allowed = true;
+  session[`import:${token}`] = { kind: 'hls', url: 'https://video.twimg.com/master.m3u8' };
+  let segmentSignal;
+  globalThis.fetch = async (url, options) => {
+    if (url.endsWith('master.m3u8')) return new Response('#EXTM3U\n#EXTINF:1,\nsegment.ts\n#EXT-X-ENDLIST');
+    segmentSignal = options.signal;
+    return new Promise((_resolve, reject) => {
+      segmentSignal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true });
+    });
+  };
+  try {
+    const port = createPort();
+    connect(port);
+    port.send({ type: 'start-direct', token });
+    while (!segmentSignal) await new Promise((resolve) => setTimeout(resolve, 0));
+    port.send({ type: 'cancel' });
+    assert.equal(segmentSignal.aborted, true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(port.messages.some((message) => message.type === 'done'), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('streams bounded chunks only after acknowledgements', async () => {
   const originalFetch = globalThis.fetch;
   const source = new Uint8Array(140000).map((_, index) => index % 251);

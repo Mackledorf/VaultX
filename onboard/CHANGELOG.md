@@ -4,6 +4,24 @@ This log records product and interface iterations so prior decisions can be unde
 
 ## 2026-11-18
 
+### Unified section aspect ratios
+
+- Keep all timeline sections at the same crop aspect ratio, while preserving independent framing where possible; freeform edits and presets update both timeline modes.
+- Scale matching crops to the export frame without letterboxing and reject inconsistent crop ratios during export validation.
+- Rationale: prevent aspect-ratio changes between clips.
+
+### Improved public post and stream imports
+
+- Discover supported post links in pages and embeds, resolve additional public video metadata shapes, and preserve explicit media selections.
+- Import supported complete, unencrypted playlists from the permitted media host, assembling their tracks and remuxing locally without re-encoding; report unsupported or inaccessible streams.
+- Rationale: make embedded and shared videos easier to import while preserving local processing and access restrictions.
+
+### Added per-section crops
+
+- Keep independent crop rectangles and aspect-ratio locks for timeline sections, copying the crop when a section is cut.
+- Preview and export mixed-ratio sections on the first kept section's frame, fitting other crops with black padding while preserving audio and playback rates.
+- Rationale: allow different clips in one edit to use different crops without distorting them.
+
 ### Added image sequences and refined editing controls
 
 - Accept local still-image batches in selection order, showing each image for one second in a temporary MP4; fit differing image sizes to the first image.

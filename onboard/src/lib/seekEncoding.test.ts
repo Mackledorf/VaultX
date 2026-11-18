@@ -13,6 +13,45 @@ type TestCore = {
   FS: { readFile: (path: string) => Uint8Array };
 };
 
+test('exports differently framed sections at a shared aspect ratio without black bars', async () => {
+  const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
+  Object.defineProperty(globalThis, 'self', { configurable: true, value: { location: { href: 'file:///ffmpeg-core.js' } } });
+  try {
+    const require = createRequire(import.meta.url);
+    const createCore: (options: { wasmBinary: Buffer }) => Promise<TestCore> = require('@ffmpeg/core');
+    const core = await createCore({ wasmBinary: readFileSync(require.resolve('@ffmpeg/core/wasm')) });
+    const logs: string[] = [];
+    core.setLogger(({ message }) => logs.push(message));
+    const run = (...args: string[]) => {
+      logs.length = 0;
+      core.exec(...args);
+      assert.equal(core.ret, 0, logs.slice(-15).join('\n'));
+      core.reset();
+    };
+    run('-f', 'lavfi', '-i', 'color=red:size=128x72:rate=30:duration=2',
+      '-c:v', 'libx264', '-preset', 'superfast', 'source.mp4');
+    const recipe = normalizeEditRecipe({
+      segments: [
+        { startTime: 0, endTime: 1, playbackRate: 1, crop: { x: 0, y: 0, width: 0.75, height: 0.75 } },
+        { startTime: 1, endTime: 2, playbackRate: 1, crop: { x: 0.25, y: 0.25, width: 0.5, height: 0.5 } },
+      ],
+      rotation: 0,
+      crop: { x: 0, y: 0, width: 1, height: 1 },
+      adjustments: {},
+    }, 2);
+    run('-i', 'source.mp4', '-filter_complex', buildMp4Filter(recipe, false, false, true, { width: 128, height: 72 }),
+      '-map', '[out]', '-pix_fmt', 'rgb24', '-f', 'rawvideo', 'frames.rgb');
+    const pixels = core.FS.readFile('frames.rgb');
+    assert.equal(pixels.length, 96 * 54 * 3 * 60);
+    for (let index = 0; index < pixels.length; index += 3) {
+      assert.ok(pixels[index] > 180, 'Export contains a dark border or frame');
+    }
+  } finally {
+    if (previousSelf) Object.defineProperty(globalThis, 'self', previousSelf);
+    else Reflect.deleteProperty(globalThis, 'self');
+  }
+});
+
 test('seeked exports preserve edited frames and audio while decoding less of the source', async () => {
   const previousSelf = Object.getOwnPropertyDescriptor(globalThis, 'self');
   Object.defineProperty(globalThis, 'self', {

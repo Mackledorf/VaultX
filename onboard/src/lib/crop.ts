@@ -5,6 +5,19 @@ export type CropHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
+export function fitCropToRatio(crop: CropRect, ratio: number): CropRect {
+  if (Math.abs(crop.width / crop.height - ratio) <= 1e-10 * Math.max(1, ratio)) return crop;
+  const minHeight = Math.min(1, 1 / ratio, Math.max(0.05, 0.05 / ratio));
+  const height = clamp(Math.sqrt(crop.width * crop.height / ratio), minHeight, Math.min(1, 1 / ratio));
+  const width = height * ratio;
+  return {
+    x: clamp(crop.x + (crop.width - width) / 2, 0, 1 - width),
+    y: clamp(crop.y + (crop.height - height) / 2, 0, 1 - height),
+    width,
+    height,
+  };
+}
+
 export function resizeCrop(crop: CropRect, handle: CropHandle, dx: number, dy: number, ratio: number | null): CropRect {
   const { x, y, width, height } = crop;
   const min = 0.05;

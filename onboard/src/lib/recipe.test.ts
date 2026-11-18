@@ -86,26 +86,33 @@ test('preflights crop dimensions before encoder startup', () => {
   assert.equal(preflightExport(baseRecipe, 10, 1920, 1080).crop.width, 1);
 });
 
-test('validates each section crop and chooses the first section for the export canvas', () => {
+test('requires a shared section aspect ratio and scales matching crops without letterboxing', () => {
   const square = { x: 0.25, y: 0, width: 0.5, height: 1 };
+  const smallerSquare = { x: 0.3, y: 0.1, width: 0.4, height: 0.8 };
   const wide = { x: 0, y: 0.25, width: 1, height: 0.5 };
   const recipe = preflightExport({
     ...baseRecipe,
     segments: [
       { startTime: 0, endTime: 4, playbackRate: 1, crop: square },
-      { startTime: 4, endTime: 8, playbackRate: 1, crop: wide },
+      { startTime: 4, endTime: 8, playbackRate: 1, crop: smallerSquare },
     ],
   }, 10, 1920, 960);
   assert.deepEqual(recipe.segments[0].crop, square);
   assert.deepEqual(getExportDimensions(recipe, 1920, 960), { width: 960, height: 960 });
-  assert.match(buildMp4Filter(recipe, false, false, true, { width: 1920, height: 960 }), /pad=960:960/);
+  const filter = buildMp4Filter(recipe, false, false, true, { width: 1920, height: 960 });
+  assert.match(filter, /scale=960:960/);
+  assert.doesNotMatch(filter, /pad=/);
+  assert.throws(() => preflightExport({
+    ...recipe,
+    segments: [recipe.segments[0], { ...recipe.segments[1], crop: wide }],
+  }, 10, 1920, 960), /same aspect ratio/);
   assert.throws(() => preflightExport({
     ...recipe,
     segments: [recipe.segments[0], { ...recipe.segments[1], crop: { ...wide, x: 0.5 } }],
   }, 10, 1920, 960), /Crop settings/);
   assert.throws(() => preflightExport({
     ...recipe,
-    segments: [recipe.segments[0], { ...recipe.segments[1], crop: { x: 0, y: 0, width: 0.05, height: 1 } }],
+    segments: [recipe.segments[0], { ...recipe.segments[1], crop: { x: 0, y: 0, width: 0.05, height: 0.1 } }],
   }, 10, 20, 960), /crop is too small/);
 });
 

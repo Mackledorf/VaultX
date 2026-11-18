@@ -1,6 +1,31 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { resizeCrop, type CropHandle } from './crop';
+import { fitCropToRatio, resizeCrop, type CropHandle } from './crop';
+
+test('fits other crops to a shared ratio while retaining their center and zoom when possible', () => {
+  const crop = { x: 0.1, y: 0.2, width: 0.6, height: 0.4 };
+  const fitted = fitCropToRatio(crop, 1);
+  assert.ok(Math.abs(fitted.width / fitted.height - 1) < 1e-10);
+  assert.ok(Math.abs(fitted.width * fitted.height - crop.width * crop.height) < 1e-10);
+  assert.ok(Math.abs(fitted.x + fitted.width / 2 - 0.4) < 1e-10);
+  assert.ok(Math.abs(fitted.y + fitted.height / 2 - 0.4) < 1e-10);
+  const restored = fitCropToRatio(fitted, 1.5);
+  for (const key of ['x', 'y', 'width', 'height'] as const) {
+    assert.ok(Math.abs(restored[key] - crop[key]) < 1e-10);
+  }
+  assert.equal(fitCropToRatio(crop, 1.5), crop);
+});
+
+test('keeps fitted crops inside the frame and respects minimum sizes when possible', () => {
+  const crop = { x: 0.95, y: 0, width: 0.05, height: 0.05 };
+  const fitted = fitCropToRatio(crop, 2);
+  assert.ok(fitted.width >= 0.05 && fitted.height >= 0.05);
+  assert.ok(fitted.x >= 0 && fitted.x + fitted.width <= 1);
+  assert.ok(Math.abs(fitted.width / fitted.height - 2) < 1e-10);
+  const extreme = fitCropToRatio(crop, 50);
+  assert.ok(extreme.width <= 1 && extreme.height <= 1);
+  assert.ok(Math.abs(extreme.width / extreme.height - 50) < 1e-10);
+});
 
 test('locked crop retains its aspect ratio and stays inside the frame for every handle', () => {
   const crop = { x: 0.25, y: 0.25, width: 0.5, height: 0.5 };

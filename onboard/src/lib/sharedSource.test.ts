@@ -53,6 +53,7 @@ test('imports chunks with progress and acknowledges each before finishing', asyn
 
   try {
     const file = await fetchSharedPost(new URL('https://x.com/user/status/123'), (value) => progress.push(value), new AbortController().signal);
+    assert.ok(file instanceof File);
     assert.equal(file.name, 'x-123.mp4');
     assert.equal(await file.text(), 'test');
     assert.deepEqual(progress, [{ loaded: 0, total: 4 }, { loaded: 4, total: 4 }]);
@@ -78,6 +79,7 @@ test('imports a selected MP4 through a one-time extension token', async () => {
   });
   try {
     const file = await fetchExtensionMp4('selected-token', () => {}, new AbortController().signal);
+    assert.ok(file instanceof File);
     assert.equal(file.name, 'clip.mp4');
     assert.equal(await file.text(), 'test');
   } finally {
@@ -181,6 +183,7 @@ test('connects when the real bridge starts after the first handoff message', asy
   }, 450);
   try {
     const file = await fetchExtensionMp4('selected-token', () => {}, new AbortController().signal);
+    assert.ok(file instanceof File);
     assert.equal(file.name, 'clip.mp4');
     assert.equal(await file.text(), 'test');
     assert.equal(starts, 1);
@@ -189,5 +192,37 @@ test('connects when the real bridge starts after the first handoff message', asy
     bridgePort?.close();
     if (previous) Object.defineProperty(globalThis, 'window', previous);
     else Reflect.deleteProperty(globalThis, 'window');
+  }
+});
+
+test('receives separate stream tracks through acknowledged chunks', async () => {
+  let connection: MessagePort | undefined;
+  const restore = installWindow((port) => {
+    connection = port;
+    let stage = 0;
+    port.onmessage = (event: MessageEvent<{ type: string }>) => {
+      if (event.data.type === 'start-direct') {
+        port.postMessage({ type: 'start', name: 'clip.mp4', format: 'hls', total: null });
+        port.postMessage({ type: 'track-start', track: 'video' });
+        port.postMessage({ type: 'chunk', data: btoa('video') });
+      } else if (event.data.type === 'ack' && stage++ === 0) {
+        port.postMessage({ type: 'track-end', track: 'video' });
+        port.postMessage({ type: 'track-start', track: 'audio' });
+        port.postMessage({ type: 'chunk', data: btoa('audio') });
+      } else if (event.data.type === 'ack') {
+        port.postMessage({ type: 'track-end', track: 'audio' });
+        port.postMessage({ type: 'done' });
+      } else if (event.data.type === 'close') port.close();
+    };
+    port.postMessage({ type: 'ready' });
+  });
+  try {
+    const source = await fetchExtensionMp4('selected-token', () => {}, new AbortController().signal);
+    assert.ok(!(source instanceof File));
+    assert.equal(await source.video.text(), 'video');
+    assert.equal(await source.audio?.text(), 'audio');
+  } finally {
+    connection?.close();
+    restore();
   }
 });

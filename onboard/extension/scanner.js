@@ -10,17 +10,30 @@ export function scanVideoSources() {
     } catch {
       return;
     }
-    if (url.protocol !== 'https:' || url.username || url.password || url.port
-        || !['redgifs.com', 'www.redgifs.com'].includes(url.hostname.toLowerCase())) return;
-    const match = url.pathname.match(/^\/(?:watch|ifr)\/([A-Za-z0-9]+)\/?$/);
-    if (!match) return;
-    const id = match[1].toLowerCase();
-    const canonicalUrl = `https://www.redgifs.com/watch/${id}`;
+    if (url.protocol !== 'https:' || url.username || url.password || url.port) return;
+    const host = url.hostname.toLowerCase();
+    let id;
+    let canonicalUrl;
+    if (['redgifs.com', 'www.redgifs.com'].includes(host)) {
+      const match = url.pathname.match(/^\/(?:watch|ifr)\/([A-Za-z0-9]+)\/?$/);
+      if (!match) return;
+      id = match[1].toLowerCase();
+      canonicalUrl = `https://www.redgifs.com/watch/${id}`;
+    } else if (['x.com', 'www.x.com', 'twitter.com', 'www.twitter.com', 'mobile.twitter.com'].includes(host)) {
+      const match = url.pathname.match(/^\/(?:i\/web|[A-Za-z0-9_]+)\/status\/(\d+)(\/(?:video|photo)\/[1-9]\d*)?\/?$/);
+      if (!match) return;
+      id = match[1];
+      canonicalUrl = `https://x.com/i/web/status/${id}${match[2] || ''}`;
+    } else if (host === 'platform.twitter.com' && /^\/embed\/tweet\.html$/i.test(url.pathname)) {
+      id = url.searchParams.get('id');
+      if (!id || !/^\d+$/.test(id)) return;
+      canonicalUrl = `https://x.com/i/web/status/${id}`;
+    } else return;
     candidates.set(canonicalUrl, {
       kind: 'shared-post',
       url: canonicalUrl,
       name: id,
-      host: 'redgifs.com',
+      host: canonicalUrl.includes('redgifs.com') ? 'redgifs.com' : 'x.com',
       width: 0,
       height: 0,
       duration: 0,
@@ -40,6 +53,7 @@ export function scanVideoSources() {
     if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) return;
     const mime = mimeType.split(';', 1)[0].trim().toLowerCase();
     const path = url.pathname.toLowerCase();
+    if (url.hostname === 'video.twimg.com' && /\/(?:vid|aud)\/[^/]+\/\d+\/\d+\//.test(path)) return;
     if (/\.(m3u8|mpd|m4s|ts|webm|mov)$/.test(path)) return;
     if (!path.endsWith('.mp4') && mime !== 'video/mp4' && !(isVideoSource && !mime)) return;
     url.hash = '';
