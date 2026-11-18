@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { runInNewContext } from 'node:vm';
 import { fetchExtensionMp4, fetchSharedPost, isSharedPostUrl } from './sharedSource';
 
 function installWindow(onConnect: (port: MessagePort) => void) {
@@ -10,6 +12,8 @@ function installWindow(onConnect: (port: MessagePort) => void) {
       location: { origin: 'https://editor.example' },
       setTimeout,
       clearTimeout,
+      setInterval,
+      clearInterval,
       postMessage(_message: unknown, _origin: string, ports: MessagePort[]) {
         onConnect(ports[0]);
       },
@@ -101,9 +105,89 @@ test('aborts an in-flight import and reports unavailable extensions', async () =
   try {
     await assert.rejects(
       fetchSharedPost(new URL('https://x.com/user/status/123'), () => {}, new AbortController().signal),
-      /Install or reload/,
+      /could not connect to the extension/,
     );
   } finally {
     restoreMissing();
+  }
+});
+
+test('cancelling while waiting for the bridge stops further attempts', async () => {
+  let attempts = 0;
+  const restore = installWindow((port) => {
+    attempts += 1;
+    port.close();
+  });
+  try {
+    const controller = new AbortController();
+    const pending = fetchExtensionMp4('selected-token', () => {}, controller.signal);
+    controller.abort();
+    await assert.rejects(pending, { name: 'AbortError' });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(attempts, 1);
+  } finally {
+    restore();
+  }
+});
+
+test('connects when the real bridge starts after the first handoff message', async () => {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const listeners: Array<(event: { source: object; origin: string; data: unknown; ports: MessagePort[] }) => void> = [];
+  const location = { origin: 'https://mackledorf.github.io', pathname: '/VaultX/Onboard/', protocol: 'https:', hostname: 'mackledorf.github.io', port: '' };
+  const browser = {
+    location,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    top: null as object | null,
+    addEventListener(_type: string, listener: typeof listeners[number]) { listeners.push(listener); },
+    postMessage(data: unknown, origin: string, ports: MessagePort[]) {
+      queueMicrotask(() => listeners.forEach((listener) => listener({ source: browser, origin, data, ports })));
+    },
+  };
+  browser.top = browser;
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: browser });
+  let starts = 0;
+  let bridgePort: MessagePort | undefined;
+  const chrome = {
+    runtime: {
+      connect() {
+        let onMessage: (message: object) => void = () => {};
+        return {
+          onMessage: { addListener(listener: (message: object) => void) { onMessage = listener; } },
+          onDisconnect: { addListener() {} },
+          postMessage(message: { type: string; token?: string }) {
+            if (message.type === 'start-direct') {
+              starts += 1;
+              assert.equal(message.token, 'selected-token');
+              onMessage({ type: 'start', name: 'clip.mp4', total: 4 });
+              onMessage({ type: 'chunk', data: btoa('test') });
+            } else if (message.type === 'ack') onMessage({ type: 'done' });
+          },
+          disconnect() {},
+        };
+      },
+    },
+  };
+  const originalPostMessage = browser.postMessage;
+  browser.postMessage = (data, origin, ports) => {
+    bridgePort = ports[0];
+    originalPostMessage(data, origin, ports);
+  };
+  const timer = setTimeout(() => {
+    const script = readFileSync(new URL('../../extension/bridge.js', import.meta.url), 'utf8');
+    runInNewContext(script, { window: browser, location, chrome });
+  }, 450);
+  try {
+    const file = await fetchExtensionMp4('selected-token', () => {}, new AbortController().signal);
+    assert.equal(file.name, 'clip.mp4');
+    assert.equal(await file.text(), 'test');
+    assert.equal(starts, 1);
+  } finally {
+    clearTimeout(timer);
+    bridgePort?.close();
+    if (previous) Object.defineProperty(globalThis, 'window', previous);
+    else Reflect.deleteProperty(globalThis, 'window');
   }
 });

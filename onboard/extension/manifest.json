@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Onboard Video Source",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Find video sources and import supported public posts into Onboard.",
   "permissions": ["activeTab", "scripting", "storage", "webRequest", "downloads"],
   "optional_host_permissions": [
@@ -21,7 +21,8 @@
       "http://127.0.0.1/*",
       "http://localhost/*"
     ],
-    "js": ["bridge.js"]
+    "js": ["bridge.js"],
+    "run_at": "document_start"
   }],
   "action": {
     "default_title": "Find MP4s for Onboard",

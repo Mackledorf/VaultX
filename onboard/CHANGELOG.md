@@ -4,6 +4,12 @@ This log records product and interface iterations so prior decisions can be unde
 
 ## 2026-11-18
 
+### Fixed extension bridge startup race
+
+- Start the extension bridge before the editor scripts and retry the handoff briefly if the bridge loads late.
+- Clarify the error when Chrome does not allow the extension on the editor site.
+- Rationale: prevent an early editor message from being lost before the extension is listening.
+
 ### Improved extension scanning and diagnostics
 
 - Scan accessible frames and open shadow roots, and optionally observe the selected tab's MP4 responses after the user grants site access.
