@@ -4,6 +4,19 @@ This log records product and interface iterations so prior decisions can be unde
 
 ## 2026-11-18
 
+### Added image sequences and refined editing controls
+
+- Accept local still-image batches in selection order, showing each image for one second in a temporary MP4; fit differing image sizes to the first image.
+- Keep crop presets locked during resizing, fix cropped preview positioning after rotation, and allow active presets to be deselected.
+- Use icon-only timeline actions, replace zoom buttons and the pan slider with timeline gestures, and ask for hyphenated export tags before queuing each MP4.
+- Rationale: streamline common editing and export workflows while keeping media local.
+
+### Reduced decoding for trimmed exports
+
+- Seek near each kept section before decoding while retaining precise trims, audio timing, and the existing adjustment and encoding filters.
+- Retry decoding from the beginning and report the fallback if a source cannot be seeked; the full source is still loaded locally.
+- Rationale: reduce time spent decoding discarded footage without changing the preview or output settings.
+
 ### Improved shared-video discovery
 
 - Detect supported shared-video links in pages and embeds, and open selected links through the existing local importer while retaining direct MP4 scanning.

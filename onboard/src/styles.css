@@ -85,7 +85,13 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .project-title-input + span { border: 1px solid var(--line-strong); border-left: 0; border-radius: 0 var(--radius-control) var(--radius-control) 0; color: var(--muted); background: #1b1d1f; padding: 5px 8px 5px 0; }
 .header-export-area { position: relative; justify-self: end; }
 .mobile-actions, .mobile-export-backdrop, .mobile-adjustment-editor, .mobile-stitch-status, .mobile-dropzone-label, .mobile-crop-reset-icon { display: none; }
-.mobile-timeline-time, .timeline-action-icon { display: none; }
+.mobile-timeline-time { display: none; }
+.timeline-action-icon { display: block; }
+.export-name-dialog form { display: grid; gap: var(--space-2); }
+.export-name-dialog h2 { margin: 0 0 var(--space-2); color: #e5e7e8; font-size: var(--type-section); }
+.export-name-dialog input { min-height: 40px; border: 1px solid var(--line-strong); border-radius: var(--radius-control); color: var(--text-control); background: #1b1d1f; padding: 0 var(--space-2); font: inherit; }
+.export-name-dialog [role="alert"] { color: #ffc1bd; }
+.export-name-actions { display: flex; justify-content: flex-end; gap: var(--space-2); margin-top: var(--space-2); }
 .export-button {
   display: inline-flex;
   min-height: 40px;
@@ -226,6 +232,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .remote-import-progress.indeterminate span { width: 35%; animation: remote-import-progress 1.2s ease-in-out infinite alternate; }
 @keyframes remote-import-progress { from { transform: translateX(0); } to { transform: translateX(185%); } }
 .onboard-video-frame { position: absolute; overflow: visible; touch-action: none; }
+.export-preview-frame { position: absolute; background: #000; pointer-events: none; }
 .onboard-video-frame.cropped { overflow: hidden; }
 .onboard-video { position: absolute; top: 50%; left: 50%; display: block; width: 100%; height: 100%; object-fit: fill; cursor: pointer; }
 .onboard-video:focus-visible { outline: none; }
@@ -304,7 +311,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 
 .mobile-panel-nav { display: none; }
 
-.timeline-editor { display: grid; min-height: 0; grid-area: timeline; grid-template-rows: 40px 40px minmax(36px, 1fr); gap: var(--space-2); border-top: 1px solid #101112; background: #222426; padding: var(--space-4); }
+.timeline-editor { display: grid; min-height: 0; grid-area: timeline; grid-template-rows: 40px minmax(36px, 1fr); gap: var(--space-2); border-top: 1px solid #101112; background: #222426; padding: var(--space-4); }
+.timeline-editor.reduction-mode { grid-template-rows: 40px 40px minmax(36px, 1fr); }
 .timeline-toolbar { position: relative; display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .timeline-title { display: flex; align-items: center; gap: var(--space-3); }
 .timeline-title strong { color: #e5e7e8; font-size: var(--type-section); font-weight: var(--weight-bold); }
@@ -312,6 +320,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .timeline-total { color: #858b8e; font-family: var(--font-mono); font-size: var(--type-control); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .timeline-tools { display: flex; gap: var(--space-2); }
 .timeline-tool { min-height: 40px; border: 1px solid #484d50; border-radius: var(--radius-control); color: var(--text-control); background: #2c2f31; padding: 0 var(--space-3); font-size: var(--type-control); font-weight: var(--weight-medium); }
+.timeline-tools .timeline-tool { display: grid; width: 40px; place-items: center; padding: 0; }
 .timeline-tool:hover:not(:disabled) { border-color: #6a7276; background: #373b3e; }
 .timeline-tool.active { border-color: #548d7d; color: #eafff8; background: #34574d; }
 .timeline-navigation { display: flex; min-width: 0; align-items: center; gap: var(--space-2); }
@@ -402,7 +411,8 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
   .speed-control { min-width: 0; }
   .speed-slider-labels, .source-section { display: none; }
   .timeline-editor { display: none; }
-  .editor-main[data-mobile-panel="video"] .timeline-editor { display: grid; grid-area: panel; min-height: 0; grid-template-rows: 40px 40px 36px; align-content: center; gap: var(--space-2); overflow: hidden; padding: var(--space-3); }
+  .editor-main[data-mobile-panel="video"] .timeline-editor { display: grid; grid-area: panel; min-height: 0; grid-template-rows: 40px 36px; align-content: center; gap: var(--space-2); overflow: hidden; padding: var(--space-3); }
+  .editor-main[data-mobile-panel="video"] .timeline-editor.reduction-mode { grid-template-rows: 40px 40px 36px; }
   .timeline-toolbar { min-width: 0; display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; grid-template-rows: 40px; align-items: center; gap: var(--space-2); }
   .timeline-title { position: static; min-width: 0; justify-self: center; transform: none; }
   .timeline-title strong, .desktop-timeline-time, .timeline-total { display: none; }
@@ -456,5 +466,5 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
   .adjustment-section { padding-block: var(--space-2) 0; }
   .adjustment-control { line-height: 1; }
   .transform-panel .tool-section { gap: var(--space-2); padding: 10px var(--space-3); }
-  .timeline-editor { grid-template-rows: 40px 40px minmax(36px, 1fr); padding-block: var(--space-3); }
+  .timeline-editor { padding-block: var(--space-3); }
 }

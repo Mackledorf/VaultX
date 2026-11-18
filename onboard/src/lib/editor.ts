@@ -3,8 +3,9 @@ import { fetchFile } from '@ffmpeg/util';
 import coreURL from '@ffmpeg/core?url';
 import wasmURL from '@ffmpeg/core/wasm?url';
 import type { VideoEditRecipe } from '../types';
-import { buildMp4Filter, preflightExport } from './recipe';
+import { buildMp4Filter, buildMp4InputArgs, getEditedDuration, preflightExport } from './recipe';
 import { describeFfmpegFailure } from './exportDiagnostics';
+import { runWithSeekFallback } from './exportExecution';
 import { videoHasAudio } from './mediaProbe';
 import { getVideoContainerExtension } from './videoSource';
 
@@ -15,6 +16,7 @@ export async function exportMp4(
   sourceWidth: number,
   sourceHeight: number,
   onProgress: (progress: number) => void,
+  onFallback: (reason: string) => void,
   signal: AbortSignal,
 ) {
   const blob = await exportWithFfmpeg(
@@ -24,6 +26,7 @@ export async function exportMp4(
     sourceWidth,
     sourceHeight,
     onProgress,
+    onFallback,
     signal,
   );
   if (blob.type !== 'video/mp4') throw new Error('MP4 export returned an invalid file.');
@@ -37,6 +40,7 @@ async function exportWithFfmpeg(
   sourceWidth: number,
   sourceHeight: number,
   onProgress: (progress: number) => void,
+  onFallback: (reason: string) => void,
   signal: AbortSignal,
 ) {
   if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
@@ -45,18 +49,24 @@ async function exportWithFfmpeg(
   const inputPath = `source-${crypto.randomUUID()}${getVideoContainerExtension(file)}`;
   const outputPath = `export-${crypto.randomUUID()}.mp4`;
   const onAbort = () => ffmpeg.terminate();
-  const onFfmpegProgress = ({ progress }: { progress: number }) => {
-    if (!Number.isFinite(progress)) return;
-    const boundedProgress = Math.max(0, Math.min(1, progress));
-    onProgress(Math.max(5, Math.min(95, Math.round(5 + boundedProgress * 90))));
-  };
+  const expectedFrames = getEditedDuration(normalizedRecipe.segments) * 30;
+  let reportedProgress = 5;
+  let seekFailure = '';
   const ffmpegLogs: string[] = [];
   const onFfmpegLog = ({ message }: { message: string }) => {
     ffmpegLogs.push(message);
     if (ffmpegLogs.length > 200) ffmpegLogs.shift();
+    if (/could not seek to position|failed to seek|error while seeking/i.test(message)) seekFailure = message;
+    const frameCount = message.match(/^\s*frame=\s*(\d+)/);
+    if (frameCount) {
+      const progress = Math.min(95, Math.round(5 + Number(frameCount[1]) / expectedFrames * 90));
+      if (progress > reportedProgress) {
+        reportedProgress = progress;
+        onProgress(progress);
+      }
+    }
   };
   signal.addEventListener('abort', onAbort, { once: true });
-  ffmpeg.on('progress', onFfmpegProgress);
   ffmpeg.on('log', onFfmpegLog);
 
   try {
@@ -83,22 +93,34 @@ async function exportWithFfmpeg(
 
     const hasAudio = await videoHasAudio(ffmpeg, inputPath);
     if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
-    const args = [
-        '-i', inputPath,
-        '-filter_complex', buildMp4Filter(normalizedRecipe, hasAudio),
-        '-map', '[out]',
-        ...(hasAudio ? ['-map', '[aout]', '-c:a', 'aac', '-b:a', '128k'] : ['-an']),
-        '-c:v', 'libx264',
-        '-preset', 'superfast',
-        '-crf', '23',
-        '-pix_fmt', 'yuv420p',
-        '-movflags', '+faststart',
-        '-f', 'mp4',
-        outputPath,
-    ];
     let exitCode: number;
     try {
-      exitCode = await ffmpeg.exec(args, 10 * 60 * 1000);
+      exitCode = await runWithSeekFallback(
+        (seek) => {
+          const args = [
+            '-loglevel', 'info',
+            ...buildMp4InputArgs(normalizedRecipe, inputPath, seek),
+            '-filter_complex', buildMp4Filter(normalizedRecipe, hasAudio, true, seek, { width: sourceWidth, height: sourceHeight }),
+            '-map', '[out]',
+            ...(hasAudio ? ['-map', '[aout]', '-c:a', 'aac', '-b:a', '128k'] : ['-an']),
+            '-c:v', 'libx264',
+            '-preset', 'superfast',
+            '-crf', '23',
+            '-pix_fmt', 'yuv420p',
+            '-movflags', '+faststart',
+            '-f', 'mp4',
+            outputPath,
+          ];
+          return ffmpeg.exec(args, 10 * 60 * 1000);
+        },
+        () => signal.aborted ? '' : seekFailure,
+        (reason) => {
+          onFallback(reason.slice(0, 240));
+          ffmpegLogs.length = 0;
+          reportedProgress = 5;
+          onProgress(5);
+        },
+      );
     } catch (executionError) {
       if (signal.aborted) throw new DOMException('Export cancelled.', 'AbortError');
       const errorMessage = executionError instanceof Error ? executionError.message : String(executionError);
@@ -129,7 +151,6 @@ async function exportWithFfmpeg(
     return new Blob([bytes], { type: 'video/mp4' });
   } finally {
     signal.removeEventListener('abort', onAbort);
-    ffmpeg.off('progress', onFfmpegProgress);
     ffmpeg.off('log', onFfmpegLog);
     ffmpeg.terminate();
   }

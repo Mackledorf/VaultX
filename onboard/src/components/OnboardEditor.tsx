@@ -1,9 +1,12 @@
 import { type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
-import { ArrowDownUp, ChevronDown, CircleDot, Combine, Contrast, Copy, Crop, Download, Droplets, Focus, Link2, List, ListRestart, Menu, Minus, Moon, Palette, Pause, Play, Plus, RefreshCw, RotateCw, ScanLine, Scissors, SlidersHorizontal, Sparkles, Sun, SunDim, SunMedium, Trash2, Upload, Video as VideoIcon, Waves, X } from 'lucide-react';
+import { ArrowDownUp, ChevronDown, CircleDot, Combine, Contrast, Copy, Crop, Download, Droplets, Focus, Link2, List, ListRestart, Menu, Moon, Palette, Pause, Play, RefreshCw, RotateCw, ScanLine, Scissors, SlidersHorizontal, Sparkles, Sun, SunDim, SunMedium, Trash2, Upload, Video as VideoIcon, Waves, X } from 'lucide-react';
+import { resizeCrop, type CropHandle } from '../lib/crop';
 import { exportMp4 as exportMp4Locally } from '../lib/editor';
+import { exportFileName } from '../lib/exportName';
+import { isStillImage, prepareImageSequence } from '../lib/imageSequence';
 import { createLivePreview } from '../lib/livePreview';
 import { getPlaybackTransition } from '../lib/playback';
-import { buildPreviewTransferTable, getAdjustmentRange, getColorTransform, getEditedDuration, isTimeInSegments, preflightExport, validateSourceDimensions } from '../lib/recipe';
+import { buildPreviewTransferTable, getAdjustmentRange, getColorTransform, getEditedDuration, getExportDimensions, isTimeInSegments, preflightExport, validateSourceDimensions } from '../lib/recipe';
 import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourceProgress } from '../lib/remoteSource';
 import { fetchExtensionMp4, fetchSharedPost, isSharedPostUrl } from '../lib/sharedSource';
 import { convertGifToMp4 } from '../lib/sourcePreparation';
@@ -12,7 +15,6 @@ import { addTimelineClip, zoomTimeline } from '../lib/timeline';
 import { isGifFile, isSupportedVideoFile } from '../lib/videoSource';
 import type { VideoEditRecipe } from '../types';
 
-const MIN_CROP_SIZE = 0.05;
 const DEFAULT_FRAME_DURATION = 1 / 30;
 const ARROW_SCRUB_HOLD_DELAY_MS = 1000;
 const PLAYBACK_RATE_MIN = 0.5;
@@ -55,7 +57,6 @@ const ADJUSTMENT_ICONS = {
   denoise: Waves,
 };
 
-type CropHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 type CropRect = VideoEditRecipe['crop'];
 type VideoSegment = VideoEditRecipe['segments'][number];
 type RemoteSourceProgressState = RemoteSourceProgress & { fileName: string };
@@ -88,6 +89,7 @@ type ExportJob = {
   progress: number;
   outputBytes?: number;
   error?: string;
+  warning?: string;
   dismissed?: boolean;
 };
 export function OnboardEditor() {
@@ -106,6 +108,7 @@ export function OnboardEditor() {
   const brandMenuRef = useRef<HTMLDivElement>(null);
   const brandButtonRef = useRef<HTMLButtonElement>(null);
   const extensionInstructionsRef = useRef<HTMLDialogElement>(null);
+  const exportNameDialogRef = useRef<HTMLDialogElement>(null);
   const remoteImportController = useRef<AbortController | null>(null);
   const stitchController = useRef<AbortController | null>(null);
   const gifPreparationController = useRef<AbortController | null>(null);
@@ -144,6 +147,8 @@ export function OnboardEditor() {
   const [hasRenamedMedia, setHasRenamedMedia] = useState(false);
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState('');
+  const [exportNameDraft, setExportNameDraft] = useState('');
+  const [exportNameError, setExportNameError] = useState('');
   const [previewUrl, setPreviewUrl] = useState('');
   const [exportJobs, setExportJobs] = useState<ExportJob[]>([]);
   const [previewMode, setPreviewMode] = useState<'loading' | 'gpu' | 'fallback'>('loading');
@@ -160,6 +165,7 @@ export function OnboardEditor() {
   const [timelineFrames, setTimelineFrames] = useState<string[]>([]);
   const [sourceDimensionsValid, setSourceDimensionsValid] = useState(false);
   const [videoFrameStyle, setVideoFrameStyle] = useState<CSSProperties>({});
+  const [exportFrameStyle, setExportFrameStyle] = useState<CSSProperties>({});
   const [currentTime, setCurrentTime] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [showCutTooltip, setShowCutTooltip] = useState(false);
@@ -184,11 +190,17 @@ export function OnboardEditor() {
   const timelineSpan = duration / timelineZoom;
   const visibleStart = clamp(timelineStart, 0, Math.max(0, duration - timelineSpan));
   const visibleEnd = visibleStart + timelineSpan;
+  const timelineViewRef = useRef({ duration, visibleStart, timelineSpan });
+  timelineViewRef.current = { duration, visibleStart, timelineSpan };
   const segmentsRef = useRef(segments);
   segmentsRef.current = segments;
   const [rotation, setRotation] = useState<0 | 90 | 180 | 270>(0);
-  const [crop, setCrop] = useState<CropRect>({ x: 0, y: 0, width: 1, height: 1 });
-  const [cropAspectRatio, setCropAspectRatio] = useState<number | null>(null);
+  const [fallbackCrop, setFallbackCrop] = useState<CropRect>({ x: 0, y: 0, width: 1, height: 1 });
+  const [fallbackCropAspectRatio, setFallbackCropAspectRatio] = useState<number | null>(null);
+  const cropSegmentIndex = segments.findIndex((segment) => isTimeInSegments(currentTime, [segment]));
+  const cropSegment = segments[cropSegmentIndex >= 0 ? cropSegmentIndex : selectedSegmentIndex];
+  const crop = cropSegment?.crop ?? fallbackCrop;
+  const cropAspectRatio = cropSegment?.cropAspectRatio === undefined ? fallbackCropAspectRatio : cropSegment.cropAspectRatio;
   const [adjustments, setAdjustments] = useState<Record<string, number>>(
     Object.fromEntries(ADJUSTMENTS.map(([key]) => [key, 0])),
   );
@@ -224,6 +236,7 @@ export function OnboardEditor() {
     const video = videoRef.current;
     if (!video || !previewUrl) return;
     let callbackId = 0;
+    let previousSegmentIndex = -1;
     let previousFrame: { mediaTime: number; presentedFrames: number } | null = null;
     const observeFrame: VideoFrameRequestCallback = (_now, metadata) => {
       if (previousFrame) {
@@ -234,6 +247,15 @@ export function OnboardEditor() {
         }
       }
       previousFrame = { mediaTime: metadata.mediaTime, presentedFrames: metadata.presentedFrames };
+      const currentIndex = segmentsRef.current.findIndex((segment) => metadata.mediaTime >= segment.startTime && metadata.mediaTime < segment.endTime);
+      if (!video.paused && !playheadHiddenAfterTrimRef.current && currentIndex >= 0 && currentIndex !== previousSegmentIndex) {
+        previousSegmentIndex = currentIndex;
+        if (reductionModeRef.current) setReductionSelectedIndex(currentIndex);
+        else setStandardSelectedIndex(currentIndex);
+        setCurrentTime(metadata.mediaTime);
+      } else if (currentIndex < 0) {
+        previousSegmentIndex = -1;
+      }
       if (!reductionModeRef.current && !video.paused && !playheadHiddenAfterTrimRef.current && !pendingPlaybackTransitionRef.current) {
         const currentSegments = segmentsRef.current;
         const transition = getPlaybackTransition(
@@ -377,13 +399,33 @@ export function OnboardEditor() {
     if (!canvas || !dimensions.width || !dimensions.height) return;
     const updateFrame = () => {
       const bounds = canvas.getBoundingClientRect();
-      const frameWidth = (rotation % 180 ? dimensions.height : dimensions.width)
-        * (cropOverlayVisible ? 1 : crop.width);
-      const frameHeight = (rotation % 180 ? dimensions.width : dimensions.height)
-        * (cropOverlayVisible ? 1 : crop.height);
-      const scale = Math.min(bounds.width / frameWidth, bounds.height / frameHeight);
+      const sourceWidth = rotation % 180 ? dimensions.height : dimensions.width;
+      const sourceHeight = rotation % 180 ? dimensions.width : dimensions.height;
+      let frameWidth = sourceWidth * (cropOverlayVisible ? 1 : crop.width);
+      let frameHeight = sourceHeight * (cropOverlayVisible ? 1 : crop.height);
+      let canvasWidth = frameWidth;
+      let canvasHeight = frameHeight;
+      if (!cropOverlayVisible && segments.length) {
+        const output = getExportDimensions({ segments, rotation, crop: fallbackCrop, adjustments: {} }, dimensions.width, dimensions.height);
+        canvasWidth = Math.max(2, output.width);
+        canvasHeight = Math.max(2, output.height);
+        frameWidth = Math.max(2, Math.floor(frameWidth / 2) * 2);
+        frameHeight = Math.max(2, Math.floor(frameHeight / 2) * 2);
+        const fit = Math.min(canvasWidth / frameWidth, canvasHeight / frameHeight);
+        frameWidth *= fit;
+        frameHeight *= fit;
+      }
+      const scale = Math.min(bounds.width / canvasWidth, bounds.height / canvasHeight);
       const width = frameWidth * scale;
       const height = frameHeight * scale;
+      const outputWidth = canvasWidth * scale;
+      const outputHeight = canvasHeight * scale;
+      setExportFrameStyle({
+        left: `${((bounds.width - outputWidth) / 2 / bounds.width) * 100}%`,
+        top: `${((bounds.height - outputHeight) / 2 / bounds.height) * 100}%`,
+        width: `${(outputWidth / bounds.width) * 100}%`,
+        height: `${(outputHeight / bounds.height) * 100}%`,
+      });
       setVideoFrameStyle({
         left: `${((bounds.width - width) / 2 / bounds.width) * 100}%`,
         top: `${((bounds.height - height) / 2 / bounds.height) * 100}%`,
@@ -395,7 +437,7 @@ export function OnboardEditor() {
     observer.observe(canvas);
     updateFrame();
     return () => observer.disconnect();
-  }, [crop, cropOverlayVisible, dimensions, rotation]);
+  }, [crop, cropOverlayVisible, dimensions, rotation, segments, fallbackCrop]);
 
   useEffect(() => {
     const track = timelineTrackRef.current;
@@ -416,9 +458,8 @@ export function OnboardEditor() {
     setTimelineFrames([]);
     if (!previewUrl || !duration || !dimensions.width || !dimensions.height || !timelineTrackSize.width || !timelineTrackSize.height) return;
     const controller = new AbortController();
-    const displayAspect = (rotation % 180 ? dimensions.height : dimensions.width)
-      * crop.width
-      / ((rotation % 180 ? dimensions.width : dimensions.height) * crop.height);
+    const output = getExportDimensions({ segments, rotation, crop: fallbackCrop, adjustments: {} }, dimensions.width, dimensions.height);
+    const displayAspect = Math.max(2, output.width) / Math.max(2, output.height);
     const frameCount = Math.max(1, Math.ceil(timelineTrackSize.width / (timelineTrackSize.height * displayAspect)));
     const thumbnailVideo = document.createElement('video');
     thumbnailVideo.muted = true;
@@ -434,7 +475,8 @@ export function OnboardEditor() {
           if (controller.signal.aborted) return;
           const time = visibleStart + timelineSpan * ((index + 0.5) / frameCount);
           await seekForTimelineFrame(thumbnailVideo, time, controller.signal);
-          frames.push(createTimelineThumbnail(thumbnailVideo, crop, rotation));
+          const frameCrop = segments.find((segment) => time >= segment.startTime && time < segment.endTime)?.crop ?? fallbackCrop;
+          frames.push(createTimelineThumbnail(thumbnailVideo, frameCrop, rotation, displayAspect));
           setTimelineFrames([...frames]);
         }
       } catch {
@@ -449,7 +491,7 @@ export function OnboardEditor() {
     })();
 
     return () => controller.abort();
-  }, [crop, dimensions, duration, previewUrl, rotation, timelineTrackSize, visibleStart, timelineSpan]);
+  }, [fallbackCrop, segments, dimensions, duration, previewUrl, rotation, timelineTrackSize, visibleStart, timelineSpan]);
 
   useEffect(() => {
     if (!duration || timelineZoom === 1) return;
@@ -459,10 +501,86 @@ export function OnboardEditor() {
       if (currentTime > start + span) return Math.min(duration - span, currentTime - span * 0.1);
       return start;
     });
-  }, [currentTime, duration, timelineZoom]);
+  }, [currentTime, duration]);
+
+  useEffect(() => {
+    const track = timelineTrackRef.current;
+    if (!track) return;
+    let pinchDistance = 0;
+    let pinchCenter = 0;
+    const zoomAt = (clientX: number, factor: number) => {
+      const { duration: total, visibleStart: start, timelineSpan: span } = timelineViewRef.current;
+      const bounds = track.getBoundingClientRect();
+      if (!total || !bounds.width) return;
+      const anchor = start + clamp((clientX - bounds.left) / bounds.width, 0, 1) * span;
+      const result = zoomTimeline(total, start, span, anchor, factor, frameDurationRef.current * 8);
+      timelineViewRef.current = { duration: total, visibleStart: result.start, timelineSpan: result.span };
+      setTimelineStart(result.start);
+      setTimelineZoom(total / result.span);
+    };
+    const wheel = (event: WheelEvent) => {
+      const { duration: total, visibleStart: start, timelineSpan: span } = timelineViewRef.current;
+      if (!total) return;
+      event.preventDefault();
+      if (!event.ctrlKey && (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY))) {
+        const delta = event.deltaX || event.deltaY;
+        const next = clamp(start + delta / track.clientWidth * span, 0, total - span);
+        timelineViewRef.current = { duration: total, visibleStart: next, timelineSpan: span };
+        setTimelineStart(next);
+      } else {
+        zoomAt(event.clientX, Math.exp(-clamp(event.deltaY, -100, 100) * 0.01));
+      }
+    };
+    const touchStart = (event: TouchEvent) => {
+      if (event.touches.length !== 2) return;
+      timelineDragRef.current = null;
+      finishEditGesture();
+      pinchDistance = Math.hypot(event.touches[0].clientX - event.touches[1].clientX, event.touches[0].clientY - event.touches[1].clientY);
+      pinchCenter = (event.touches[0].clientX + event.touches[1].clientX) / 2;
+      event.preventDefault();
+    };
+    const touchMove = (event: TouchEvent) => {
+      if (event.touches.length !== 2 || !pinchDistance) return;
+      const distance = Math.hypot(event.touches[0].clientX - event.touches[1].clientX, event.touches[0].clientY - event.touches[1].clientY);
+      const center = (event.touches[0].clientX + event.touches[1].clientX) / 2;
+      if (distance > 0) zoomAt(center, distance / pinchDistance);
+      const { duration: total, visibleStart: start, timelineSpan: span } = timelineViewRef.current;
+      if (total && track.clientWidth) {
+        const next = clamp(start - (center - pinchCenter) / track.clientWidth * span, 0, total - span);
+        timelineViewRef.current = { duration: total, visibleStart: next, timelineSpan: span };
+        setTimelineStart(next);
+      }
+      pinchCenter = center;
+      pinchDistance = distance;
+      event.preventDefault();
+    };
+    const touchEnd = (event: TouchEvent) => {
+      if (event.touches.length < 2) pinchDistance = 0;
+    };
+    const keyDown = (event: KeyboardEvent) => {
+      if (event.key !== '+' && event.key !== '=' && event.key !== '-') return;
+      const bounds = track.getBoundingClientRect();
+      zoomAt(bounds.left + bounds.width / 2, event.key === '-' ? 0.5 : 2);
+      event.preventDefault();
+    };
+    track.addEventListener('wheel', wheel, { passive: false });
+    track.addEventListener('touchstart', touchStart, { passive: false });
+    track.addEventListener('touchmove', touchMove, { passive: false });
+    track.addEventListener('touchend', touchEnd);
+    track.addEventListener('touchcancel', touchEnd);
+    track.addEventListener('keydown', keyDown);
+    return () => {
+      track.removeEventListener('wheel', wheel);
+      track.removeEventListener('touchstart', touchStart);
+      track.removeEventListener('touchmove', touchMove);
+      track.removeEventListener('touchend', touchEnd);
+      track.removeEventListener('touchcancel', touchEnd);
+      track.removeEventListener('keydown', keyDown);
+    };
+  }, []);
 
   function chooseVideo(event: ChangeEvent<HTMLInputElement>) {
-    const nextFile = event.currentTarget.files?.[0];
+    const files = Array.from(event.currentTarget.files ?? []);
     event.currentTarget.value = '';
     if (isStitching || gifPreparationController.current) {
       setError('Wait for the current source operation to finish before loading another source.');
@@ -471,13 +589,38 @@ export function OnboardEditor() {
     remoteImportController.current?.abort();
     remoteImportController.current = null;
     setRemoteSourceProgress(null);
-    importLocalSource(nextFile);
+    importLocalSources(files);
   }
 
-  function importLocalSource(nextFile?: File) {
-    if (!nextFile) return;
+  function importLocalSources(files: File[]) {
+    if (!files.length) return;
+    if (files.every(isStillImage)) {
+      const controller = new AbortController();
+      gifPreparationController.current = controller;
+      const name = files.length === 1 ? files[0].name : `${files.length} images`;
+      setError('');
+      setGifImportProgress({ fileName: name, progress: 0 });
+      void prepareImageSequence(files, (progress) => {
+        if (gifPreparationController.current === controller) setGifImportProgress({ fileName: name, progress });
+      }, controller.signal).then((preparedFile) => {
+        if (!controller.signal.aborted) loadVideo(preparedFile);
+      }).catch((preparationError: unknown) => {
+        if (!controller.signal.aborted) setError(preparationError instanceof Error ? preparationError.message : 'Could not prepare these images.');
+      }).finally(() => {
+        if (gifPreparationController.current === controller) {
+          gifPreparationController.current = null;
+          setGifImportProgress(null);
+        }
+      });
+      return;
+    }
+    if (files.length !== 1) {
+      setError('Choose a batch of still images or one video. Use Stitch to join videos.');
+      return;
+    }
+    const nextFile = files[0];
     if (!isSupportedVideoFile(nextFile)) {
-      setError('Choose an MP4, MOV, WEBM, or GIF file.');
+      setError('Choose an MP4, MOV, WEBM, GIF, or still image.');
       return;
     }
     if (!isGifFile(nextFile)) {
@@ -554,8 +697,8 @@ export function OnboardEditor() {
       reductionSelectedIndex,
       reductionMode,
       rotation,
-      crop: { ...crop },
-      cropAspectRatio,
+      crop: { ...fallbackCrop },
+      cropAspectRatio: fallbackCropAspectRatio,
       adjustments: { ...adjustments },
     };
   }
@@ -616,8 +759,8 @@ export function OnboardEditor() {
     setReductionSelectedIndex(snapshot.reductionSelectedIndex);
     setReductionMode(snapshot.reductionMode);
     setRotation(snapshot.rotation);
-    setCrop({ ...snapshot.crop });
-    setCropAspectRatio(snapshot.cropAspectRatio);
+    setFallbackCrop({ ...snapshot.crop });
+    setFallbackCropAspectRatio(snapshot.cropAspectRatio);
     setAdjustments({ ...snapshot.adjustments });
     setCurrentTime(nextTime);
     playheadHiddenAfterTrimRef.current = false;
@@ -707,8 +850,8 @@ export function OnboardEditor() {
     setIsRenaming(false);
     frameDurationRef.current = DEFAULT_FRAME_DURATION;
     setRotation(0);
-    setCrop({ x: 0, y: 0, width: 1, height: 1 });
-    setCropAspectRatio(null);
+    setFallbackCrop({ x: 0, y: 0, width: 1, height: 1 });
+    setFallbackCropAspectRatio(null);
     setAdjustments(Object.fromEntries(ADJUSTMENTS.map(([key]) => [key, 0])));
   }
 
@@ -803,11 +946,26 @@ export function OnboardEditor() {
     return { x: 0, y: (1 - height) / 2, width: 1, height };
   }
 
+  function updateSelectedCrop(nextCrop: CropRect, nextAspectRatio: number | null) {
+    const index = cropSegmentIndex >= 0 ? cropSegmentIndex : selectedSegmentIndex;
+    if (!segments[index]) {
+      setFallbackCrop(nextCrop);
+      setFallbackCropAspectRatio(nextAspectRatio);
+      return;
+    }
+    setSegments((current) => current.map((segment, segmentIndex) => (
+      segmentIndex === index ? { ...segment, crop: nextCrop, cropAspectRatio: nextAspectRatio } : segment
+    )));
+  }
+
   function setCropAspect(aspectRatio: number) {
     if (!dimensions.width || !dimensions.height) return;
     recordEdit();
-    setCropAspectRatio(aspectRatio);
-    setCrop(cropForAspectRatio(aspectRatio));
+    if (cropAspectRatio !== null && (Math.abs(cropAspectRatio - aspectRatio) < 1e-10 || Math.abs(cropAspectRatio - 1 / aspectRatio) < 1e-10)) {
+      updateSelectedCrop(crop, null);
+      return;
+    }
+    updateSelectedCrop(cropForAspectRatio(aspectRatio), aspectRatio);
     setCropOverlayVisible(true);
   }
 
@@ -815,8 +973,7 @@ export function OnboardEditor() {
     if (cropAspectRatio === null || cropAspectRatio === 1) return;
     const invertedAspectRatio = 1 / cropAspectRatio;
     recordEdit();
-    setCropAspectRatio(invertedAspectRatio);
-    setCrop(cropForAspectRatio(invertedAspectRatio));
+    updateSelectedCrop(cropForAspectRatio(invertedAspectRatio), invertedAspectRatio);
     setCropOverlayVisible(true);
   }
 
@@ -824,8 +981,13 @@ export function OnboardEditor() {
     const nextRotation = ROTATIONS[(ROTATIONS.indexOf(rotation) + 1) % ROTATIONS.length];
     recordEdit();
     setRotation(nextRotation);
-    if (cropAspectRatio !== null && dimensions.width && dimensions.height) {
-      setCrop(cropForAspectRatio(cropAspectRatio, nextRotation));
+    if (dimensions.width && dimensions.height) {
+      const rotateLockedCrops = (items: VideoSegment[]) => items.map((segment) => (
+        segment.cropAspectRatio == null ? segment : { ...segment, crop: cropForAspectRatio(segment.cropAspectRatio, nextRotation) }
+      ));
+      setStandardSegments(rotateLockedCrops);
+      setReductionSegments(rotateLockedCrops);
+      if (fallbackCropAspectRatio !== null) setFallbackCrop(cropForAspectRatio(fallbackCropAspectRatio, nextRotation));
     }
   }
 
@@ -839,7 +1001,7 @@ export function OnboardEditor() {
     remoteImportController.current?.abort();
     remoteImportController.current = null;
     setRemoteSourceProgress(null);
-    importLocalSource(event.dataTransfer.files[0]);
+    importLocalSources(Array.from(event.dataTransfer.files));
   }
 
   function onMetadata() {
@@ -849,7 +1011,7 @@ export function OnboardEditor() {
       return;
     }
     setDuration(video.duration);
-    setStandardSegments([{ startTime: 0, endTime: video.duration, playbackRate: 1 }]);
+    setStandardSegments([{ startTime: 0, endTime: video.duration, playbackRate: 1, crop: { x: 0, y: 0, width: 1, height: 1 }, cropAspectRatio: null }]);
     setReductionSegments([]);
     setStandardSelectedIndex(0);
     setReductionSelectedIndex(0);
@@ -1273,7 +1435,11 @@ export function OnboardEditor() {
   function addMarkedClip() {
     if (inPoint === null || outPoint === null) return;
     try {
-      const next = addTimelineClip(segments, inPoint, outPoint, duration);
+      const next = addTimelineClip(segments, inPoint, outPoint, duration).map((segment) => (
+        segment.startTime === inPoint && segment.endTime === outPoint
+          ? { ...segment, crop: { ...fallbackCrop }, cropAspectRatio: fallbackCropAspectRatio }
+          : segment
+      ));
       recordEdit();
       setSegments(next);
       setSelectedSegmentIndex(next.findIndex((segment) => segment.startTime === inPoint && segment.endTime === outPoint));
@@ -1283,13 +1449,6 @@ export function OnboardEditor() {
     } catch (clipError) {
       setError(clipError instanceof Error ? clipError.message : 'Could not add the selected clip.');
     }
-  }
-
-  function changeTimelineZoom(factor: number) {
-    if (!duration) return;
-    const result = zoomTimeline(duration, visibleStart, timelineSpan, currentTime, factor, frameDurationRef.current * 8);
-    setTimelineStart(result.start);
-    setTimelineZoom(duration / result.span);
   }
 
   function cutAtTime(time: number) {
@@ -1510,22 +1669,11 @@ export function OnboardEditor() {
     if (!drag) return;
     const dx = (event.clientX - drag.startX) / drag.rect.width;
     const dy = (event.clientY - drag.startY) / drag.rect.height;
-    const { x, y, width, height } = drag.crop;
-    let next = { ...drag.crop };
-    if (drag.handle.includes('w')) {
-      const left = clamp(x + dx, 0, x + width - MIN_CROP_SIZE);
-      next = { ...next, x: left, width: x + width - left };
-    }
-    if (drag.handle.includes('e')) next.width = clamp(width + dx, MIN_CROP_SIZE, 1 - x);
-    if (drag.handle.includes('n')) {
-      const top = clamp(y + dy, 0, y + height - MIN_CROP_SIZE);
-      next = { ...next, y: top, height: y + height - top };
-    }
-    if (drag.handle.includes('s')) next.height = clamp(height + dy, MIN_CROP_SIZE, 1 - y);
+    const frameAspect = rotation % 180 ? dimensions.height / dimensions.width : dimensions.width / dimensions.height;
+    const next = resizeCrop(drag.crop, drag.handle, dx, dy, cropAspectRatio === null ? null : cropAspectRatio / frameAspect);
     if (next.x === crop.x && next.y === crop.y && next.width === crop.width && next.height === crop.height) return;
     recordEdit();
-    setCropAspectRatio(null);
-    setCrop(next);
+    updateSelectedCrop(next, cropAspectRatio);
   }
 
   function clearCropDrag() {
@@ -1582,6 +1730,9 @@ export function OnboardEditor() {
             (progress) => updateExportJobs((current) => current.map((item) => (
               item.id === job.id ? { ...item, progress } : item
             ))),
+            (reason) => updateExportJobs((current) => current.map((item) => (
+              item.id === job.id ? { ...item, warning: `Seeking unavailable; decoding from the beginning instead. ${reason}` } : item
+            ))),
             controller.signal,
           );
           if (!controller.signal.aborted) {
@@ -1619,24 +1770,33 @@ export function OnboardEditor() {
     }
   }
 
+  function promptExport() {
+    setExportNameDraft(mediaName.replace(/\.[^.]+$/, ''));
+    setExportNameError('');
+    exportNameDialogRef.current?.showModal();
+  }
+
   function startExport() {
     if (!file || !segments.length || !sourceDimensionsValid) return;
     const recipe = {
       segments: segments.map((segment) => ({ ...segment })),
       rotation,
-      crop: { ...crop },
+      crop: { ...fallbackCrop },
       adjustments: { ...adjustments },
     };
     try {
       preflightExport(recipe, duration, dimensions.width, dimensions.height);
     } catch (preflightError) {
-      setError(preflightError instanceof Error ? preflightError.message : 'Export settings are invalid.');
+      setExportNameError(preflightError instanceof Error ? preflightError.message : 'Export settings are invalid.');
       return;
     }
-    if (hasRenamedMedia) {
-      setMediaName((current) => `${current.replace(/\.[^.]+$/, '')}.mp4`);
+    let fileName: string;
+    try {
+      fileName = exportFileName(exportNameDraft);
+    } catch (nameError) {
+      setExportNameError(nameError instanceof Error ? nameError.message : 'Invalid export name.');
+      return;
     }
-    const baseName = mediaName.replace(/\.[^.]+$/, '') || 'onboard';
     const job: ExportJob = {
       id: crypto.randomUUID(),
       file,
@@ -1644,11 +1804,12 @@ export function OnboardEditor() {
       duration,
       width: dimensions.width,
       height: dimensions.height,
-      fileName: `${baseName}.mp4`,
+      fileName,
       status: 'queued',
       progress: 0,
     };
     setError('');
+    exportNameDialogRef.current?.close();
     updateExportJobs((current) => [...current, job]);
     void processExportQueue();
   }
@@ -1729,27 +1890,14 @@ export function OnboardEditor() {
   const fallbackClarity = adjustments.clarity / 100;
   const cropScaleX = cropOverlayVisible ? 1 : 1 / crop.width;
   const cropScaleY = cropOverlayVisible ? 1 : 1 / crop.height;
-  const orientedAspectRatio = rotated ? dimensions.height / dimensions.width : dimensions.width / dimensions.height;
   const cropOffsetX = cropOverlayVisible ? 0 : (0.5 - crop.x) / crop.width - 0.5;
   const cropOffsetY = cropOverlayVisible ? 0 : (0.5 - crop.y) / crop.height - 0.5;
-  let videoOffsetX = cropOffsetX;
-  let videoOffsetY = cropOffsetY;
-  if (rotation === 90) {
-    videoOffsetX = cropOffsetY / orientedAspectRatio;
-    videoOffsetY = -cropOffsetX * orientedAspectRatio;
-  } else if (rotation === 180) {
-    videoOffsetX = -cropOffsetX;
-    videoOffsetY = -cropOffsetY;
-  } else if (rotation === 270) {
-    videoOffsetX = -cropOffsetY / orientedAspectRatio;
-    videoOffsetY = cropOffsetX * orientedAspectRatio;
-  }
   const canvasStyle: CSSProperties = {};
   const videoStyle: CSSProperties = {
     width: `${(rotated ? dimensions.width / dimensions.height : 1) * cropScaleX * 100}%`,
     height: `${(rotated ? dimensions.height / dimensions.width : 1) * cropScaleY * 100}%`,
-    left: `${(0.5 + videoOffsetX) * 100}%`,
-    top: `${(0.5 + videoOffsetY) * 100}%`,
+    left: `${(0.5 + cropOffsetX) * 100}%`,
+    top: `${(0.5 + cropOffsetY) * 100}%`,
     transform: `translate(-50%, -50%) rotate(${rotation}deg)`,
   };
   const sourceVideoStyle: CSSProperties = previewMode === 'fallback'
@@ -1874,8 +2022,8 @@ export function OnboardEditor() {
             <button
               className="export-button"
               type="button"
-              onClick={startExport}
-              disabled={!file || !duration || !sourceDimensionsValid || !segments.length || isStitching}
+              onClick={promptExport}
+              disabled={!file || !duration || !sourceDimensionsValid || !segments.length || isStitching || gifImportProgress !== null}
             >
               <Download size={15} /> Export MP4
             </button>
@@ -1892,9 +2040,9 @@ export function OnboardEditor() {
             </button>
             {mobileActionsOpen && (
               <div className="mobile-action-menu" role="group" aria-label="Editor actions">
-                <button type="button" disabled={!file || !duration || !sourceDimensionsValid || !segments.length || isStitching} onClick={() => {
+                <button type="button" disabled={!file || !duration || !sourceDimensionsValid || !segments.length || isStitching || gifImportProgress !== null} onClick={() => {
                   setMobileActionsOpen(false);
-                  startExport();
+                  promptExport();
                 }}>
                   <Download size={16} aria-hidden="true" /> Export MP4
                 </button>
@@ -1931,6 +2079,7 @@ export function OnboardEditor() {
                               ? `Downloaded · ${formatByteCount(job.outputBytes ?? 0)} (${(job.outputBytes ?? 0).toLocaleString()} bytes)`
                               : job.error}
                       </span>
+                      {job.warning && <span>{job.warning}</span>}
                     </div>
                     <button
                       className="export-queue-close"
@@ -1956,6 +2105,19 @@ export function OnboardEditor() {
         </div>
       </header>
 
+      <dialog className="extension-instructions export-name-dialog" ref={exportNameDialogRef} aria-labelledby="export-name-title">
+        <form onSubmit={(event) => { event.preventDefault(); startExport(); }}>
+          <h2 id="export-name-title">Name export</h2>
+          <label htmlFor="export-name">Tags</label>
+          <input id="export-name" value={exportNameDraft} onChange={(event) => { setExportNameDraft(event.currentTarget.value); setExportNameError(''); }} autoFocus />
+          {exportNameError && <span role="alert">{exportNameError}</span>}
+          <div className="export-name-actions">
+            <button type="button" className="tool-button" onClick={() => exportNameDialogRef.current?.close()}>Cancel</button>
+            <button type="submit" className="export-button">Export MP4</button>
+          </div>
+        </form>
+      </dialog>
+
       <dialog className="extension-instructions" ref={extensionInstructionsRef} aria-labelledby="extension-instructions-title" onClose={() => brandButtonRef.current?.focus()}>
         <div className="extension-instructions-heading">
           <h2 id="extension-instructions-title">Install the Chrome extension</h2>
@@ -1972,7 +2134,7 @@ export function OnboardEditor() {
       </dialog>
 
       <section className="editor-main" aria-label="Video editor" data-mobile-panel={mobilePanel}>
-        <input ref={fileInput} className="visually-hidden" type="file" accept="video/mp4,.mp4,video/quicktime,.mov,video/webm,.webm,image/gif,.gif" onChange={chooseVideo} />
+        <input ref={fileInput} className="visually-hidden" type="file" accept="video/mp4,.mp4,video/quicktime,.mov,video/webm,.webm,image/*" multiple onChange={chooseVideo} />
         <input ref={stitchInput} className="visually-hidden" type="file" accept="video/mp4,.mp4,video/quicktime,.mov" multiple onChange={chooseVideosToStitch} />
         <aside id="mobile-panel-tools" className="tool-panel transform-panel" aria-label="Video editing controls">
           <section className="tool-section rotation-section">
@@ -1989,11 +2151,11 @@ export function OnboardEditor() {
             <div className="crop-presets" role="group" aria-label="Crop aspect ratio">
               {CROP_PRESETS.map(([label, aspectRatio]) => (
                 <button
-                  className={cropAspectRatio === aspectRatio ? 'crop-preset active' : 'crop-preset'}
+                  className={cropAspectRatio !== null && (Math.abs(cropAspectRatio - aspectRatio) < 1e-10 || Math.abs(cropAspectRatio - 1 / aspectRatio) < 1e-10) ? 'crop-preset active' : 'crop-preset'}
                   type="button"
                   key={label}
                   aria-label={`${label} crop`}
-                  aria-pressed={cropAspectRatio === aspectRatio}
+                  aria-pressed={cropAspectRatio !== null && (Math.abs(cropAspectRatio - aspectRatio) < 1e-10 || Math.abs(cropAspectRatio - 1 / aspectRatio) < 1e-10)}
                   disabled={!file || !dimensions.width || !dimensions.height}
                   onClick={() => setCropAspect(aspectRatio)}
                 >
@@ -2009,8 +2171,7 @@ export function OnboardEditor() {
                 disabled={!file || (crop.x === 0 && crop.y === 0 && crop.width === 1 && crop.height === 1 && cropAspectRatio === null)}
                 onClick={() => {
                   recordEdit();
-                  setCrop({ x: 0, y: 0, width: 1, height: 1 });
-                  setCropAspectRatio(null);
+                  updateSelectedCrop({ x: 0, y: 0, width: 1, height: 1 }, null);
                 }}
               >
                 <Crop className="desktop-crop-reset-icon" size={15} />
@@ -2073,8 +2234,8 @@ export function OnboardEditor() {
               <button
                 className="source-icon-button"
                 type="button"
-                aria-label={file ? 'Replace source video' : 'Choose source video'}
-                title={file ? 'Replace source video' : 'Choose source video'}
+                aria-label={file ? 'Replace source' : 'Choose video or images'}
+                title={file ? 'Replace source' : 'Choose video or images'}
                 disabled={isStitching || gifImportProgress !== null}
                 onClick={() => fileInput.current?.click()}
               >
@@ -2123,7 +2284,7 @@ export function OnboardEditor() {
                 <div
                   className="remote-import-progress"
                   role="progressbar"
-                  aria-label="Preparing GIF for editing"
+                  aria-label="Preparing source for editing"
                   aria-valuemin={0}
                   aria-valuemax={100}
                   aria-valuenow={gifImportProgress.progress}
@@ -2229,7 +2390,7 @@ export function OnboardEditor() {
                     <div
                       className="remote-import-progress"
                       role="progressbar"
-                      aria-label="Preparing GIF for editing"
+                      aria-label="Preparing source for editing"
                       aria-valuemin={0}
                       aria-valuemax={100}
                       aria-valuenow={gifImportProgress.progress}
@@ -2240,7 +2401,7 @@ export function OnboardEditor() {
                   </>
                 ) : (
                   <>
-                    <strong className="desktop-dropzone-label">Drop an MP4, MOV, WEBM, or GIF to begin</strong>
+                    <strong className="desktop-dropzone-label">Drop a video or images to begin</strong>
                     <span>or <button type="button" onClick={() => fileInput.current?.click()}>browse files</button></span>
                     <span className="mobile-dropzone-label">
                       <button type="button" onClick={() => fileInput.current?.click()}>browse files</button> to begin
@@ -2249,6 +2410,8 @@ export function OnboardEditor() {
                 )}
               </div>
             ) : (
+              <>
+              {!cropOverlayVisible && <div className="export-preview-frame" style={exportFrameStyle} aria-hidden="true" />}
               <div className={`onboard-video-frame${cropOverlayVisible ? '' : ' cropped'}`} style={videoFrameStyle} onPointerMove={updateCrop} onPointerUp={clearCropDrag} onPointerCancel={clearCropDrag}>
                 <video
                   ref={videoRef}
@@ -2304,6 +2467,7 @@ export function OnboardEditor() {
                 )}
                 {file && previewStatus && <div className="preview-status" role="status">{previewStatus}</div>}
               </div>
+              </>
             )}
           </div>
           {isStitching && (
@@ -2311,6 +2475,14 @@ export function OnboardEditor() {
               <span>Stitching videos · {stitchProgress ?? 0}%</span>
               <div className="progress-track" role="progressbar" aria-label="Stitching video sources" aria-valuemin={0} aria-valuemax={100} aria-valuenow={stitchProgress ?? 0}>
                 <span style={{ width: `${stitchProgress ?? 0}%` }} />
+              </div>
+            </div>
+          )}
+          {file && gifImportProgress && (
+            <div className="mobile-stitch-status" role="status" aria-live="polite">
+              <span>Preparing {gifImportProgress.fileName} · {gifImportProgress.progress}%</span>
+              <div className="progress-track" role="progressbar" aria-label="Preparing source for editing" aria-valuemin={0} aria-valuemax={100} aria-valuenow={gifImportProgress.progress}>
+                <span style={{ width: `${gifImportProgress.progress}%` }} />
               </div>
             </div>
           )}
@@ -2458,7 +2630,7 @@ export function OnboardEditor() {
           </section>
         </aside>
 
-      <section id="mobile-panel-timeline" className="timeline-editor" aria-label="Video editing timeline">
+      <section id="mobile-panel-timeline" className={`timeline-editor${reductionMode ? ' reduction-mode' : ''}`} aria-label="Video editing timeline">
         <div className="timeline-toolbar">
           <div className="timeline-title">
             <strong>Timeline</strong>
@@ -2486,44 +2658,24 @@ export function OnboardEditor() {
           <div className="timeline-tools">
             <button className="timeline-tool" type="button" aria-label="Cut" title="Cut" disabled={!canCutAtTime(currentTime)} onClick={() => cutAtTime(currentTime)}>
               <Scissors className="timeline-action-icon" size={16} aria-hidden="true" />
-              <span className="timeline-action-label">Cut</span>
             </button>
             <button className="timeline-tool" type="button" aria-label="Remove section" title="Remove section" onClick={removeSelectedSegment} disabled={(!reductionMode && segments.length <= 1) || !selectedSegment()}>
               <Trash2 className="timeline-action-icon" size={16} aria-hidden="true" />
-              <span className="timeline-action-label">Remove section</span>
             </button>
             <button className={`timeline-tool${reductionMode ? ' active' : ''}`} type="button" aria-label="Reductionist mode" title="Reductionist mode" aria-pressed={reductionMode} disabled={!duration} onClick={toggleReductionMode}>
               <ListRestart className="timeline-action-icon" size={16} aria-hidden="true" />
-              <span className="timeline-action-label">Reductionist</span>
             </button>
           </div>
         </div>
-        <div className="timeline-navigation">
-          <button className="timeline-tool timeline-zoom" type="button" aria-label="Zoom out timeline" title="Zoom out timeline" disabled={!duration || timelineZoom <= 1} onClick={() => changeTimelineZoom(0.5)}><Minus size={16} /></button>
-          <span className="timeline-window-time">{formatTime(visibleStart)}</span>
-          <input
-            className="timeline-pan"
-            type="range"
-            aria-label="Pan timeline"
-            min={0}
-            max={Math.max(0, duration - timelineSpan)}
-            step="any"
-            value={visibleStart}
-            disabled={!duration || timelineZoom <= 1}
-            onChange={(event) => setTimelineStart(Number(event.currentTarget.value))}
-            onKeyDown={(event) => event.stopPropagation()}
-            onKeyUp={(event) => event.stopPropagation()}
-          />
-          <span className="timeline-window-time">{formatTime(visibleEnd)}</span>
-          <button className="timeline-tool timeline-zoom" type="button" aria-label="Zoom in timeline" title="Zoom in timeline" disabled={!duration || timelineSpan <= frameDurationRef.current * 8} onClick={() => changeTimelineZoom(2)}><Plus size={16} /></button>
-          {reductionMode && (
+        {reductionMode && (
+          <div className="timeline-navigation">
             <div className="timeline-mark-tools">
               <button className="timeline-tool" type="button" aria-label={`Set in point${inPoint === null ? '' : `, currently ${formatTime(inPoint)}`}`} title={inPoint === null ? 'Set in point' : `In: ${formatTime(inPoint)}`} onClick={() => setInPoint(videoRef.current?.currentTime ?? currentTime)}>In</button>
               <button className="timeline-tool" type="button" aria-label={`Set out point${outPoint === null ? '' : `, currently ${formatTime(outPoint)}`}`} title={outPoint === null ? 'Set out point' : `Out: ${formatTime(outPoint)}`} onClick={() => setOutPoint(videoRef.current?.currentTime ?? currentTime)}>Out</button>
               <button className="timeline-tool" type="button" aria-label="Add clip" title="Add clip" disabled={inPoint === null || outPoint === null} onClick={addMarkedClip}>Add</button>
             </div>
-          )}
-        </div>
+          </div>
+        )}
         <div
           ref={timelineTrackRef}
           className="timeline-track"
@@ -2731,6 +2883,7 @@ function createTimelineThumbnail(
   video: HTMLVideoElement,
   crop: CropRect,
   rotation: VideoEditRecipe['rotation'],
+  outputAspect: number,
 ) {
   const scale = Math.min(1, 320 / video.videoWidth, 180 / video.videoHeight);
   const source = document.createElement('canvas');
@@ -2754,20 +2907,26 @@ function createTimelineThumbnail(
   const cropWidth = Math.max(1, Math.round(crop.width * oriented.width));
   const cropHeight = Math.max(1, Math.round(crop.height * oriented.height));
   const thumbnail = document.createElement('canvas');
-  thumbnail.width = cropWidth;
-  thumbnail.height = cropHeight;
+  const thumbnailHeight = Math.min(180, 320 / outputAspect);
+  thumbnail.width = Math.max(1, Math.round(thumbnailHeight * outputAspect));
+  thumbnail.height = Math.max(1, Math.round(thumbnailHeight));
   const thumbnailContext = thumbnail.getContext('2d');
   if (!thumbnailContext) throw new Error('The browser could not create a timeline preview.');
+  thumbnailContext.fillStyle = '#000';
+  thumbnailContext.fillRect(0, 0, thumbnail.width, thumbnail.height);
+  const fit = Math.min(thumbnail.width / cropWidth, thumbnail.height / cropHeight);
+  const width = cropWidth * fit;
+  const height = cropHeight * fit;
   thumbnailContext.drawImage(
     oriented,
     cropX,
     cropY,
     cropWidth,
     cropHeight,
-    0,
-    0,
-    thumbnail.width,
-    thumbnail.height,
+    (thumbnail.width - width) / 2,
+    (thumbnail.height - height) / 2,
+    width,
+    height,
   );
   return thumbnail.toDataURL('image/jpeg', 0.78);
 }

@@ -58,7 +58,8 @@ export function normalizeEditRecipe(value: unknown, sourceDuration: number): Vid
     ) {
       throw new Error('Playback speed must be between 0.5x and 2x in 0.1x increments.');
     }
-    segments.push({ startTime, endTime, playbackRate });
+    const crop = segment.crop === undefined ? undefined : normalizeCrop(segment.crop);
+    segments.push({ startTime, endTime, playbackRate, ...(crop ? { crop } : {}) });
     previousEnd = endTime;
   }
   const rotation = finiteNumber(recipe.rotation ?? 0, 'Rotation');
@@ -66,19 +67,7 @@ export function normalizeEditRecipe(value: unknown, sourceDuration: number): Vid
     throw new Error('Rotation must be 0, 90, 180, or 270 degrees.');
   }
 
-  const rawCrop = asRecord(recipe.crop, 'A crop selection is required.');
-  const crop = {
-    x: finiteNumber(rawCrop.x, 'Crop left'),
-    y: finiteNumber(rawCrop.y, 'Crop top'),
-    width: finiteNumber(rawCrop.width, 'Crop width'),
-    height: finiteNumber(rawCrop.height, 'Crop height'),
-  };
-  if (
-    crop.x < 0 || crop.y < 0 || crop.width < 0.05 || crop.height < 0.05 ||
-    crop.x + crop.width > 1.0001 || crop.y + crop.height > 1.0001
-  ) {
-    throw new Error('Crop settings must stay within the video frame.');
-  }
+  const crop = normalizeCrop(recipe.crop);
 
   const rawAdjustments = recipe.adjustments === undefined
     ? {}
@@ -112,12 +101,42 @@ export function preflightExport(
 
   const rotatedWidth = recipe.rotation === 90 || recipe.rotation === 270 ? sourceHeight : sourceWidth;
   const rotatedHeight = recipe.rotation === 90 || recipe.rotation === 270 ? sourceWidth : sourceHeight;
-  const cropWidth = Math.floor(rotatedWidth * recipe.crop.width);
-  const cropHeight = Math.floor(rotatedHeight * recipe.crop.height);
-  if (cropWidth < 2 || cropHeight < 2) {
-    throw new Error('The current crop is too small for the source video. Choose a larger crop before exporting.');
+  for (const segment of recipe.segments) {
+    const crop = segment.crop ?? recipe.crop;
+    const cropWidth = Math.floor(rotatedWidth * crop.width);
+    const cropHeight = Math.floor(rotatedHeight * crop.height);
+    if (cropWidth < 2 || cropHeight < 2) {
+      throw new Error('A section crop is too small for the source video. Choose a larger crop before exporting.');
+    }
   }
   return recipe;
+}
+
+function normalizeCrop(value: unknown): VideoEditRecipe['crop'] {
+  const rawCrop = asRecord(value, 'A crop selection is required.');
+  const crop = {
+    x: finiteNumber(rawCrop.x, 'Crop left'),
+    y: finiteNumber(rawCrop.y, 'Crop top'),
+    width: finiteNumber(rawCrop.width, 'Crop width'),
+    height: finiteNumber(rawCrop.height, 'Crop height'),
+  };
+  if (
+    crop.x < 0 || crop.y < 0 || crop.width < 0.05 || crop.height < 0.05 ||
+    crop.x + crop.width > 1.0001 || crop.y + crop.height > 1.0001
+  ) {
+    throw new Error('Crop settings must stay within the video frame.');
+  }
+  return crop;
+}
+
+export function getExportDimensions(recipe: VideoEditRecipe, sourceWidth: number, sourceHeight: number) {
+  const width = recipe.rotation % 180 ? sourceHeight : sourceWidth;
+  const height = recipe.rotation % 180 ? sourceWidth : sourceHeight;
+  const crop = recipe.segments[0]?.crop ?? recipe.crop;
+  return {
+    width: Math.floor(width * crop.width / 2) * 2,
+    height: Math.floor(height * crop.height / 2) * 2,
+  };
 }
 
 export function validateSourceDimensions(width: number, height: number) {
@@ -137,14 +156,34 @@ export function getEditedDuration(segments: VideoEditRecipe['segments']) {
   );
 }
 
-export function buildMp4Filter(recipe: VideoEditRecipe, hasAudio = false) {
-  const filters = buildVideoSegmentFilters(recipe);
+function segmentSeekTime(startTime: number) {
+  // Whole-second preroll keeps the resampler aligned to the original sample grid.
+  return Math.max(0, Math.floor(startTime) - 1);
+}
+
+export function buildMp4InputArgs(recipe: VideoEditRecipe, inputPath: string, seek = true) {
+  return [
+    '-copyts', '-start_at_zero',
+    ...recipe.segments.flatMap((segment) => {
+      const start = seek ? segmentSeekTime(segment.startTime) : 0;
+      return [...(start > 0 ? ['-ss', String(start)] : []), '-i', inputPath];
+    }),
+  ];
+}
+
+export function buildMp4Filter(recipe: VideoEditRecipe, hasAudio = false, separateInputs = false, seek = true, sourceSize?: { width: number; height: number }) {
+  const filters = buildVideoSegmentFilters(recipe, separateInputs, sourceSize);
   filters.push('[joined]scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1[out]');
   if (hasAudio) {
     recipe.segments.forEach((segment, index) => {
       const duration = (segment.endTime - segment.startTime) / segment.playbackRate;
+      const seekTime = separateInputs && seek ? segmentSeekTime(segment.startTime) : 0;
+      const audioInput = separateInputs ? index : 0;
+      // Avoid padding from time zero while preserving the original trim timestamps.
+      const beforeResample = seekTime ? `asetpts=PTS-${seekTime}/TB,` : '';
+      const afterResample = seekTime ? `asetpts=PTS+${seekTime}/TB,` : '';
       filters.push(
-        `[0:a:0]aresample=48000:async=1:first_pts=0,atrim=start=${segment.startTime}:end=${segment.endTime},asetpts=PTS-STARTPTS,atempo=${segment.playbackRate},apad,atrim=duration=${duration}[audio${index}]`,
+        `[${audioInput}:a:0]${beforeResample}aresample=48000:async=1:first_pts=0,${afterResample}atrim=start=${segment.startTime}:end=${segment.endTime},asetpts=PTS-STARTPTS,atempo=${segment.playbackRate},apad,atrim=duration=${duration}[audio${index}]`,
       );
     });
     const inputs = recipe.segments.map((_segment, index) => `[audio${index}]`).join('');
@@ -153,8 +192,8 @@ export function buildMp4Filter(recipe: VideoEditRecipe, hasAudio = false) {
   return filters.join(';');
 }
 
-function buildVideoSegmentFilters(recipe: VideoEditRecipe) {
-  const { crop, adjustments, rotation } = recipe;
+function buildVideoSegmentFilters(recipe: VideoEditRecipe, separateInputs: boolean, sourceSize?: { width: number; height: number }) {
+  const { adjustments, rotation } = recipe;
   const transform = getColorTransform(adjustments);
   const unsharpAmount = (adjustments.sharpness + adjustments.definition * 0.7) / 100;
   const clarityAmount = adjustments.clarity / 100;
@@ -171,10 +210,6 @@ function buildVideoSegmentFilters(recipe: VideoEditRecipe) {
     `eq=saturation=${transform.saturation}`,
   ];
   const temporalFilters: string[] = [];
-  const spatialFilters = [
-    ...rotationFilters,
-    `crop=iw*${crop.width}:ih*${crop.height}:iw*${crop.x}:ih*${crop.y}`,
-  ];
   if (unsharpAmount > 0) {
     frameFilters.push(`unsharp=5:5:${Math.min(2, unsharpAmount).toFixed(3)}:5:5:0`);
   }
@@ -188,16 +223,30 @@ function buildVideoSegmentFilters(recipe: VideoEditRecipe) {
     const temporalChroma = (denoiseAmount * 0.05).toFixed(2);
     temporalFilters.push(`hqdn3d=${spatialLuma}:${spatialChroma}:${temporalLuma}:${temporalChroma}`);
   }
-  const segmentFilters = recipe.segments.map((segment, index) => (
-    `[0:v]${[
+  const firstCrop = recipe.segments[0]?.crop ?? recipe.crop;
+  const hasDifferentCrops = recipe.segments.some((segment) => {
+    const crop = segment.crop ?? recipe.crop;
+    return crop.width !== firstCrop.width || crop.height !== firstCrop.height;
+  });
+  if (hasDifferentCrops && !sourceSize) throw new Error('Source dimensions are required for per-section crops.');
+  const output = sourceSize ? getExportDimensions(recipe, sourceSize.width, sourceSize.height) : null;
+  const segmentFilters = recipe.segments.map((segment, index) => {
+    const crop = segment.crop ?? recipe.crop;
+    return `[${separateInputs ? index : 0}:v]${[
       `trim=start=${segment.startTime}:end=${segment.endTime}`,
       `setpts=(PTS-STARTPTS)/${segment.playbackRate}`,
-      ...spatialFilters,
+      ...rotationFilters,
+      `crop=iw*${crop.width}:ih*${crop.height}:iw*${crop.x}:ih*${crop.y}`,
       ...temporalFilters,
       'fps=30',
       ...frameFilters,
-    ].join(',')}[segment${index}]`
-  ));
+      ...(hasDifferentCrops && output ? [
+        `scale=${output.width}:${output.height}:force_original_aspect_ratio=decrease:force_divisible_by=2`,
+        `pad=${output.width}:${output.height}:(ow-iw)/2:(oh-ih)/2:black`,
+        'setsar=1',
+      ] : []),
+    ].join(',')}[segment${index}]`;
+  });
   const segmentInputs = recipe.segments.map((_segment, index) => `[segment${index}]`).join('');
   segmentFilters.push(`${segmentInputs}concat=n=${recipe.segments.length}:v=1:a=0[joined]`);
   return segmentFilters;
