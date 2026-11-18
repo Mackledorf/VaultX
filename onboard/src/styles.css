@@ -304,7 +304,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 
 .mobile-panel-nav { display: none; }
 
-.timeline-editor { display: grid; min-height: 0; grid-area: timeline; grid-template-rows: 40px 20px minmax(48px, 1fr); gap: var(--space-2); border-top: 1px solid #101112; background: #222426; padding: var(--space-4); }
+.timeline-editor { display: grid; min-height: 0; grid-area: timeline; grid-template-rows: 40px 40px minmax(36px, 1fr); gap: var(--space-2); border-top: 1px solid #101112; background: #222426; padding: var(--space-4); }
 .timeline-toolbar { position: relative; display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
 .timeline-title { display: flex; align-items: center; gap: var(--space-3); }
 .timeline-title strong { color: #e5e7e8; font-size: var(--type-section); font-weight: var(--weight-bold); }
@@ -314,16 +314,18 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 .timeline-tool { min-height: 40px; border: 1px solid #484d50; border-radius: var(--radius-control); color: var(--text-control); background: #2c2f31; padding: 0 var(--space-3); font-size: var(--type-control); font-weight: var(--weight-medium); }
 .timeline-tool:hover:not(:disabled) { border-color: #6a7276; background: #373b3e; }
 .timeline-tool.active { border-color: #548d7d; color: #eafff8; background: #34574d; }
-.timeline-ruler { position: relative; color: var(--muted); font-family: var(--font-mono); font-size: var(--type-control); font-variant-numeric: tabular-nums; }
-.timeline-ruler span { position: absolute; transform: translateX(-50%); white-space: nowrap; }
-.timeline-ruler span:first-child { transform: none; }
-.timeline-ruler span:last-child { transform: translateX(-100%); }
+.timeline-navigation { display: flex; min-width: 0; align-items: center; gap: var(--space-2); }
+.timeline-zoom { display: grid; width: 40px; min-width: 40px; place-items: center; padding: 0; }
+.timeline-window-time { color: var(--muted); font-size: var(--type-control); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.timeline-pan { min-width: 40px; flex: 1; accent-color: var(--accent); cursor: pointer; }
+.timeline-mark-tools { display: flex; gap: var(--space-2); }
 .timeline-track { position: relative; min-height: 36px; overflow: visible; border: 1px solid #494e51; background: #292c2e; touch-action: none; user-select: none; }
 .timeline-thumbnails { position: absolute; z-index: 0; inset: 0; display: flex; overflow: hidden; pointer-events: none; }
 .timeline-thumbnails::after { position: absolute; inset: 0; background: rgba(0,0,0,.5); content: ""; }
 .timeline-thumbnails img { display: block; width: auto; height: 100%; flex: 0 0 auto; object-fit: contain; }
 .timeline-empty-tick { position: absolute; z-index: 1; top: 0; bottom: 0; width: 1px; background: rgba(164,168,172,.55); pointer-events: none; }
 .timeline-excluded { position: absolute; z-index: 1; top: 0; bottom: 0; background: rgba(10,11,12,.76); pointer-events: none; }
+.timeline-selection-mark { position: absolute; z-index: 7; top: 0; bottom: 0; width: 2px; background: var(--accent); pointer-events: none; }
 .timeline-cut-mark { position: absolute; z-index: 7; top: -2px; bottom: -2px; width: 2px; transform: translateX(-50%); background: rgba(224,229,231,.86); pointer-events: none; }
 .timeline-cut-mark::before, .timeline-cut-mark::after { position: absolute; left: -3px; width: 7px; height: 2px; background: #c2c6c8; content: ""; }
 .timeline-cut-mark::before { top: 0; }
@@ -400,9 +402,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
   .speed-control { min-width: 0; }
   .speed-slider-labels, .source-section { display: none; }
   .timeline-editor { display: none; }
-  .editor-main[data-mobile-panel="video"] .timeline-editor { display: grid; grid-area: panel; min-height: 0; grid-template-rows: 40px 20px 48px; align-content: center; gap: var(--space-2); overflow: hidden; padding: var(--space-3); }
+  .editor-main[data-mobile-panel="video"] .timeline-editor { display: grid; grid-area: panel; min-height: 0; grid-template-rows: 40px 40px 36px; align-content: center; gap: var(--space-2); overflow: hidden; padding: var(--space-3); }
   .timeline-toolbar { min-width: 0; display: grid; grid-template-columns: 40px minmax(0, 1fr) auto; grid-template-rows: 40px; align-items: center; gap: var(--space-2); }
-  .timeline-title { position: absolute; left: 50%; min-width: 0; transform: translateX(-50%); }
+  .timeline-title { position: static; min-width: 0; justify-self: center; transform: none; }
   .timeline-title strong, .desktop-timeline-time, .timeline-total { display: none; }
   .mobile-timeline-time { display: inline-flex; min-height: 40px; max-width: 100%; min-width: 0; align-items: center; overflow: hidden; border: 0; color: var(--text-control); background: transparent; padding: 0; font-family: var(--font-mono); font-size: var(--type-control); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
   .timeline-toolbar .transport-button { position: static; grid-row: 1; grid-column: 1; justify-self: start; transform: none; }
@@ -410,7 +412,9 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
   .timeline-tool { display: grid; width: 40px; min-width: 40px; min-height: 40px; place-items: center; padding: 0; }
   .timeline-action-icon { display: block; }
   .timeline-action-label { display: none; }
-  .timeline-ruler span { visibility: hidden; }
+  .timeline-window-time { display: none; }
+  .timeline-mark-tools { gap: var(--space-1); }
+  .timeline-navigation { gap: var(--space-1); }
   .timeline-track { min-width: 0; min-height: 36px; }
   .adjustment-section { display: none; }
   .mobile-adjustment-editor { display: grid; min-width: 0; min-height: 0; grid-template-rows: auto auto; align-content: center; gap: var(--space-2); overflow: hidden; padding: var(--space-3); }
@@ -452,5 +456,5 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
   .adjustment-section { padding-block: var(--space-2) 0; }
   .adjustment-control { line-height: 1; }
   .transform-panel .tool-section { gap: var(--space-2); padding: 10px var(--space-3); }
-  .timeline-editor { grid-template-rows: 40px 20px minmax(36px, 1fr); padding-block: var(--space-3); }
+  .timeline-editor { grid-template-rows: 40px 40px minmax(36px, 1fr); padding-block: var(--space-3); }
 }

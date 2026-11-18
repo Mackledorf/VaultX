@@ -4,6 +4,12 @@ This log records product and interface iterations so prior decisions can be unde
 
 ## 2026-11-18
 
+### Added reductionist editing and timeline zoom
+
+- Add a separate, initially empty reductionist timeline where users mark in and out points and add non-overlapping clips; switching modes preserves both timelines.
+- Preview the whole source while selecting clips, and zoom or pan the timeline for finer positioning without changing source timing.
+- Rationale: make it easier to assemble a short edit from a long source and adjust clip boundaries precisely.
+
 ### Started range-loading support
 
 - Add an extension-side, one-time-token-bound byte-range session with response validation, source-change detection, cancellation, and diagnostic errors.

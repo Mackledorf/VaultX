@@ -1,5 +1,5 @@
 import { type ChangeEvent, type CSSProperties, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type PointerEvent, useEffect, useRef, useState } from 'react';
-import { ArrowDownUp, ChevronDown, CircleDot, Combine, Contrast, Copy, Crop, Download, Droplets, Focus, Link2, List, ListRestart, Menu, Moon, Palette, Pause, Play, RefreshCw, RotateCw, ScanLine, Scissors, SlidersHorizontal, Sparkles, Sun, SunDim, SunMedium, Trash2, Upload, Video as VideoIcon, Waves, X } from 'lucide-react';
+import { ArrowDownUp, ChevronDown, CircleDot, Combine, Contrast, Copy, Crop, Download, Droplets, Focus, Link2, List, ListRestart, Menu, Minus, Moon, Palette, Pause, Play, Plus, RefreshCw, RotateCw, ScanLine, Scissors, SlidersHorizontal, Sparkles, Sun, SunDim, SunMedium, Trash2, Upload, Video as VideoIcon, Waves, X } from 'lucide-react';
 import { exportMp4 as exportMp4Locally } from '../lib/editor';
 import { createLivePreview } from '../lib/livePreview';
 import { getPlaybackTransition } from '../lib/playback';
@@ -8,6 +8,7 @@ import { fetchRemoteMp4, formatByteCount, parseRemoteMp4Url, type RemoteSourcePr
 import { fetchExtensionMp4, fetchSharedPost, isSharedPostUrl } from '../lib/sharedSource';
 import { convertGifToMp4 } from '../lib/sourcePreparation';
 import { stitchVideos } from '../lib/stitch';
+import { addTimelineClip, zoomTimeline } from '../lib/timeline';
 import { isGifFile, isSupportedVideoFile } from '../lib/videoSource';
 import type { VideoEditRecipe } from '../types';
 
@@ -59,8 +60,11 @@ type CropRect = VideoEditRecipe['crop'];
 type VideoSegment = VideoEditRecipe['segments'][number];
 type RemoteSourceProgressState = RemoteSourceProgress & { fileName: string };
 type EditorSnapshot = {
-  segments: VideoSegment[];
-  selectedSegmentIndex: number;
+  standardSegments: VideoSegment[];
+  reductionSegments: VideoSegment[];
+  standardSelectedIndex: number;
+  reductionSelectedIndex: number;
+  reductionMode: boolean;
   rotation: VideoEditRecipe['rotation'];
   crop: CropRect;
   cropAspectRatio: number | null;
@@ -131,6 +135,7 @@ export function OnboardEditor() {
   const pendingEditSnapshotRef = useRef<EditorSnapshot | null>(null);
   const timelineDragRef = useRef<
     | { type: 'scrub' }
+    | { type: 'scrub-pending'; pointerX: number }
     | { type: 'trim'; index: number; edge: 'startTime' | 'endTime'; segments: VideoSegment[]; rect: DOMRect; pointerX: number; restoreTime: number }
     | null
   >(null);
@@ -161,10 +166,26 @@ export function OnboardEditor() {
   const [cropOverlayVisible, setCropOverlayVisible] = useState(true);
   const [playheadHiddenAfterTrim, setPlayheadHiddenAfterTrim] = useState(false);
   const playheadHiddenAfterTrimRef = useRef(false);
-  const [segments, setSegments] = useState<VideoSegment[]>([]);
+  const [reductionMode, setReductionMode] = useState(false);
+  const reductionModeRef = useRef(reductionMode);
+  reductionModeRef.current = reductionMode;
+  const [standardSegments, setStandardSegments] = useState<VideoSegment[]>([]);
+  const [reductionSegments, setReductionSegments] = useState<VideoSegment[]>([]);
+  const [standardSelectedIndex, setStandardSelectedIndex] = useState(0);
+  const [reductionSelectedIndex, setReductionSelectedIndex] = useState(0);
+  const segments = reductionMode ? reductionSegments : standardSegments;
+  const setSegments = reductionMode ? setReductionSegments : setStandardSegments;
+  const selectedSegmentIndex = reductionMode ? reductionSelectedIndex : standardSelectedIndex;
+  const setSelectedSegmentIndex = reductionMode ? setReductionSelectedIndex : setStandardSelectedIndex;
+  const [inPoint, setInPoint] = useState<number | null>(null);
+  const [outPoint, setOutPoint] = useState<number | null>(null);
+  const [timelineZoom, setTimelineZoom] = useState(1);
+  const [timelineStart, setTimelineStart] = useState(0);
+  const timelineSpan = duration / timelineZoom;
+  const visibleStart = clamp(timelineStart, 0, Math.max(0, duration - timelineSpan));
+  const visibleEnd = visibleStart + timelineSpan;
   const segmentsRef = useRef(segments);
   segmentsRef.current = segments;
-  const [selectedSegmentIndex, setSelectedSegmentIndex] = useState(0);
   const [rotation, setRotation] = useState<0 | 90 | 180 | 270>(0);
   const [crop, setCrop] = useState<CropRect>({ x: 0, y: 0, width: 1, height: 1 });
   const [cropAspectRatio, setCropAspectRatio] = useState<number | null>(null);
@@ -213,7 +234,7 @@ export function OnboardEditor() {
         }
       }
       previousFrame = { mediaTime: metadata.mediaTime, presentedFrames: metadata.presentedFrames };
-      if (!video.paused && !playheadHiddenAfterTrimRef.current && !pendingPlaybackTransitionRef.current) {
+      if (!reductionModeRef.current && !video.paused && !playheadHiddenAfterTrimRef.current && !pendingPlaybackTransitionRef.current) {
         const currentSegments = segmentsRef.current;
         const transition = getPlaybackTransition(
           metadata.mediaTime,
@@ -411,7 +432,7 @@ export function OnboardEditor() {
         const frames: string[] = [];
         for (let index = 0; index < frameCount; index += 1) {
           if (controller.signal.aborted) return;
-          const time = duration * ((index + 0.5) / frameCount);
+          const time = visibleStart + timelineSpan * ((index + 0.5) / frameCount);
           await seekForTimelineFrame(thumbnailVideo, time, controller.signal);
           frames.push(createTimelineThumbnail(thumbnailVideo, crop, rotation));
           setTimelineFrames([...frames]);
@@ -428,7 +449,17 @@ export function OnboardEditor() {
     })();
 
     return () => controller.abort();
-  }, [crop, dimensions, duration, previewUrl, rotation, timelineTrackSize]);
+  }, [crop, dimensions, duration, previewUrl, rotation, timelineTrackSize, visibleStart, timelineSpan]);
+
+  useEffect(() => {
+    if (!duration || timelineZoom === 1) return;
+    setTimelineStart((start) => {
+      const span = duration / timelineZoom;
+      if (currentTime < start) return Math.max(0, currentTime - span * 0.9);
+      if (currentTime > start + span) return Math.min(duration - span, currentTime - span * 0.1);
+      return start;
+    });
+  }, [currentTime, duration, timelineZoom]);
 
   function chooseVideo(event: ChangeEvent<HTMLInputElement>) {
     const nextFile = event.currentTarget.files?.[0];
@@ -517,8 +548,11 @@ export function OnboardEditor() {
 
   function getEditSnapshot(): EditorSnapshot {
     return {
-      segments: segments.map((segment) => ({ ...segment })),
-      selectedSegmentIndex,
+      standardSegments: standardSegments.map((segment) => ({ ...segment })),
+      reductionSegments: reductionSegments.map((segment) => ({ ...segment })),
+      standardSelectedIndex,
+      reductionSelectedIndex,
+      reductionMode,
       rotation,
       crop: { ...crop },
       cropAspectRatio,
@@ -563,20 +597,24 @@ export function OnboardEditor() {
   }
 
   function applyEditSnapshot(snapshot: EditorSnapshot) {
-    const restoredSegments = snapshot.segments.map((segment) => ({ ...segment }));
-    const nextSelectedIndex = clamp(snapshot.selectedSegmentIndex, 0, Math.max(0, restoredSegments.length - 1));
-    const nextTime = isTimeInSegments(currentTime, restoredSegments)
+    const restoredSegments = snapshot.reductionMode ? snapshot.reductionSegments : snapshot.standardSegments;
+    const restoredIndex = snapshot.reductionMode ? snapshot.reductionSelectedIndex : snapshot.standardSelectedIndex;
+    const nextSelectedIndex = clamp(restoredIndex, 0, Math.max(0, restoredSegments.length - 1));
+    const nextTime = snapshot.reductionMode || isTimeInSegments(currentTime, restoredSegments)
       ? currentTime
       : restoredSegments[0]?.startTime ?? 0;
     clearTrimPreview();
     videoRef.current?.pause();
     if (videoRef.current) {
       videoRef.current.currentTime = nextTime;
-      videoRef.current.playbackRate = restoredSegments[nextSelectedIndex]?.playbackRate ?? 1;
+      videoRef.current.playbackRate = snapshot.reductionMode ? 1 : restoredSegments[nextSelectedIndex]?.playbackRate ?? 1;
     }
     setPlaying(false);
-    setSegments(restoredSegments);
-    setSelectedSegmentIndex(nextSelectedIndex);
+    setStandardSegments(snapshot.standardSegments.map((segment) => ({ ...segment })));
+    setReductionSegments(snapshot.reductionSegments.map((segment) => ({ ...segment })));
+    setStandardSelectedIndex(snapshot.standardSelectedIndex);
+    setReductionSelectedIndex(snapshot.reductionSelectedIndex);
+    setReductionMode(snapshot.reductionMode);
     setRotation(snapshot.rotation);
     setCrop({ ...snapshot.crop });
     setCropAspectRatio(snapshot.cropAspectRatio);
@@ -641,7 +679,15 @@ export function OnboardEditor() {
     finishEditGesture();
     setError('');
     setDuration(0);
-    setSegments([]);
+    setStandardSegments([]);
+    setReductionSegments([]);
+    setStandardSelectedIndex(0);
+    setReductionSelectedIndex(0);
+    setReductionMode(false);
+    setInPoint(null);
+    setOutPoint(null);
+    setTimelineZoom(1);
+    setTimelineStart(0);
     setCurrentTime(0);
     setCropOverlayVisible(true);
     setPlayheadHiddenAfterTrim(false);
@@ -803,8 +849,10 @@ export function OnboardEditor() {
       return;
     }
     setDuration(video.duration);
-    setSegments([{ startTime: 0, endTime: video.duration, playbackRate: 1 }]);
-    setSelectedSegmentIndex(0);
+    setStandardSegments([{ startTime: 0, endTime: video.duration, playbackRate: 1 }]);
+    setReductionSegments([]);
+    setStandardSelectedIndex(0);
+    setReductionSelectedIndex(0);
     setCurrentTime(0);
     setDimensions({ width: video.videoWidth, height: video.videoHeight });
     try {
@@ -837,7 +885,7 @@ export function OnboardEditor() {
     ));
     if (segmentIndex >= 0) {
       if (segmentIndex !== selectedSegmentIndex) setSelectedSegmentIndex(segmentIndex);
-      if (video.playbackRate !== segments[segmentIndex].playbackRate) {
+      if (!reductionMode && video.playbackRate !== segments[segmentIndex].playbackRate) {
         video.playbackRate = segments[segmentIndex].playbackRate;
       }
     }
@@ -869,6 +917,10 @@ export function OnboardEditor() {
 
   function onVideoEnded() {
     const video = videoRef.current;
+    if (reductionMode) {
+      setPlaying(false);
+      return;
+    }
     const firstSegment = segments[0];
     if (!video || !firstSegment) {
       setPlaying(false);
@@ -889,7 +941,10 @@ export function OnboardEditor() {
     if (!video) return;
     clearTrimPreview();
     if (video.paused) {
-      if (playheadHiddenAfterTrim) {
+      if (reductionMode) {
+        if (video.currentTime >= duration) video.currentTime = 0;
+        video.playbackRate = 1;
+      } else if (playheadHiddenAfterTrim) {
         const firstSegment = segments[0];
         if (!firstSegment) return;
         video.currentTime = firstSegment.startTime;
@@ -899,7 +954,7 @@ export function OnboardEditor() {
         if (!currentSegment) video.currentTime = segments.find((segment) => segment.startTime > video.currentTime)?.startTime ?? segments[0]?.startTime ?? 0;
       }
       const activeSegment = segments.find((segment) => video.currentTime >= segment.startTime && video.currentTime < segment.endTime);
-      if (activeSegment) video.playbackRate = activeSegment.playbackRate;
+      if (!reductionMode && activeSegment) video.playbackRate = activeSegment.playbackRate;
       try {
         await video.play();
         playheadHiddenAfterTrimRef.current = false;
@@ -920,13 +975,13 @@ export function OnboardEditor() {
     clearTrimPreview();
     const containingSegment = segments.find((segment) => value >= segment.startTime && value < segment.endTime);
     const nextSegment = segments.find((segment) => segment.startTime > value);
-    const resolvedTime = containingSegment
+    const resolvedTime = reductionMode ? clamp(value, 0, duration) : containingSegment
       ? value
       : nextSegment?.startTime ?? segments[segments.length - 1]?.endTime ?? 0;
     video.currentTime = resolvedTime;
     const activeIndex = segments.findIndex((segment) => resolvedTime >= segment.startTime && resolvedTime < segment.endTime);
     if (activeIndex >= 0) {
-      video.playbackRate = segments[activeIndex].playbackRate;
+      if (!reductionMode) video.playbackRate = segments[activeIndex].playbackRate;
       setSelectedSegmentIndex(activeIndex);
     }
     setCurrentTime(resolvedTime);
@@ -974,6 +1029,11 @@ export function OnboardEditor() {
   }
 
   function scrubByFrame(direction: -1 | 1) {
+    if (reductionMode) {
+      videoRef.current?.pause();
+      seekVideo(clamp((videoRef.current?.currentTime ?? currentTime) + direction * frameDurationRef.current, 0, duration));
+      return;
+    }
     if (!segments.length) return;
     const video = videoRef.current;
     const frameDuration = frameDurationRef.current;
@@ -1025,7 +1085,7 @@ export function OnboardEditor() {
   function getTimelineTime(event: PointerEvent<HTMLDivElement>) {
     const bounds = event.currentTarget.getBoundingClientRect();
     if (!bounds.width) return 0;
-    return clamp((event.clientX - bounds.left) / bounds.width, 0, 1) * duration;
+    return visibleStart + clamp((event.clientX - bounds.left) / bounds.width, 0, 1) * timelineSpan;
   }
 
   function onTimelinePointerDown(event: PointerEvent<HTMLDivElement>) {
@@ -1054,7 +1114,16 @@ export function OnboardEditor() {
       return;
     }
     const time = getTimelineTime(event);
-    if (!isTimeInSegments(time, segments)) return;
+    if (reductionMode) {
+      const bounds = event.currentTarget.getBoundingClientRect();
+      const playheadX = bounds.left + ((currentTime - visibleStart) / timelineSpan) * bounds.width;
+      if (Math.abs(event.clientX - playheadX) > 24) {
+        event.currentTarget.setPointerCapture(event.pointerId);
+        timelineDragRef.current = { type: 'scrub-pending', pointerX: event.clientX };
+        event.currentTarget.focus({ preventScroll: true });
+        return;
+      }
+    } else if (!isTimeInSegments(time, segments)) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     timelineDragRef.current = { type: 'scrub' };
@@ -1069,7 +1138,7 @@ export function OnboardEditor() {
   function onTimelineDoubleClick(event: ReactMouseEvent<HTMLDivElement>) {
     if (!duration || playheadHiddenAfterTrim) return;
     const bounds = event.currentTarget.getBoundingClientRect();
-    const playheadX = bounds.left + (currentTime / duration) * bounds.width;
+    const playheadX = bounds.left + ((currentTime - visibleStart) / timelineSpan) * bounds.width;
     if (Math.abs(event.clientX - playheadX) > 8) return;
     event.preventDefault();
     setShowCutTooltip(true);
@@ -1078,13 +1147,23 @@ export function OnboardEditor() {
   function onTimelinePointerMove(event: PointerEvent<HTMLDivElement>) {
     const drag = timelineDragRef.current;
     if (!drag) return;
+    if (drag.type === 'scrub-pending') {
+      if (Math.abs(event.clientX - drag.pointerX) <= 3) return;
+      timelineDragRef.current = { type: 'scrub' };
+      playheadHiddenAfterTrimRef.current = false;
+      setPlayheadHiddenAfterTrim(false);
+      setShowCutTooltip(false);
+      videoRef.current?.pause();
+      previewTimelineTime(getTimelineTime(event));
+      return;
+    }
     if (drag.type === 'scrub') {
       previewTimelineTime(getTimelineTime(event));
       return;
     }
     const index = drag.index;
     const segment = drag.segments[index];
-    const delta = ((event.clientX - drag.pointerX) / drag.rect.width) * duration;
+    const delta = ((event.clientX - drag.pointerX) / drag.rect.width) * timelineSpan;
     const updated = drag.segments.map((item) => ({ ...item }));
     if (drag.edge === 'startTime') {
       const lowerBound = index > 0 ? drag.segments[index - 1].endTime : 0;
@@ -1098,7 +1177,7 @@ export function OnboardEditor() {
       item.startTime !== segments[itemIndex].startTime || item.endTime !== segments[itemIndex].endTime
     ));
     if (changed) recordEdit();
-    if (!playheadRemainsInKeptVideo && !playheadHiddenAfterTrim) {
+    if (!reductionMode && !playheadRemainsInKeptVideo && !playheadHiddenAfterTrim) {
       playheadHiddenAfterTrimRef.current = true;
       setPlayheadHiddenAfterTrim(true);
       videoRef.current?.pause();
@@ -1136,7 +1215,7 @@ export function OnboardEditor() {
     const edge = event.currentTarget.dataset.edge as 'startTime' | 'endTime' | undefined;
     const segment = segments[index];
     if (!edge || !segment) return;
-    const delta = event.key === 'ArrowLeft' ? -0.25 : 0.25;
+    const delta = (event.key === 'ArrowLeft' ? -1 : 1) * frameDurationRef.current;
     const updated = segments.map((item) => ({ ...item }));
     if (edge === 'startTime') {
       const lowerBound = index > 0 ? segments[index - 1].endTime : 0;
@@ -1150,7 +1229,7 @@ export function OnboardEditor() {
     setSegments(updated);
     setSelectedSegmentIndex(index);
     setShowCutTooltip(false);
-    if (isTimeInSegments(currentTime, updated)) {
+    if (reductionMode || isTimeInSegments(currentTime, updated)) {
       playheadHiddenAfterTrimRef.current = false;
       setPlayheadHiddenAfterTrim(false);
     } else {
@@ -1163,6 +1242,54 @@ export function OnboardEditor() {
         : Math.max(updated[index].startTime, updated[index].endTime - frameDurationRef.current);
       showTrimPreviewFrame(previewTime, currentTime);
     }
+  }
+
+  function toggleReductionMode() {
+    const nextMode = !reductionMode;
+    const video = videoRef.current;
+    clearTrimPreview();
+    stopArrowScrub();
+    video?.pause();
+    pendingPlaybackTransitionRef.current = null;
+    reductionModeRef.current = nextMode;
+    setReductionMode(nextMode);
+    setPlaying(false);
+    setShowCutTooltip(false);
+    playheadHiddenAfterTrimRef.current = false;
+    setPlayheadHiddenAfterTrim(false);
+    if (video) {
+      const time = video.currentTime;
+      const standardTarget = standardSegments.find((segment) => time >= segment.startTime && time < segment.endTime)
+        ?? standardSegments.find((segment) => segment.startTime > time)
+        ?? standardSegments[standardSegments.length - 1];
+      const nextTime = nextMode || !standardTarget ? time
+        : time >= standardTarget.startTime && time < standardTarget.endTime ? time : standardTarget.startTime;
+      video.currentTime = nextTime;
+      video.playbackRate = nextMode ? 1 : standardTarget?.playbackRate ?? 1;
+      setCurrentTime(nextTime);
+    }
+  }
+
+  function addMarkedClip() {
+    if (inPoint === null || outPoint === null) return;
+    try {
+      const next = addTimelineClip(segments, inPoint, outPoint, duration);
+      recordEdit();
+      setSegments(next);
+      setSelectedSegmentIndex(next.findIndex((segment) => segment.startTime === inPoint && segment.endTime === outPoint));
+      setInPoint(null);
+      setOutPoint(null);
+      setError('');
+    } catch (clipError) {
+      setError(clipError instanceof Error ? clipError.message : 'Could not add the selected clip.');
+    }
+  }
+
+  function changeTimelineZoom(factor: number) {
+    if (!duration) return;
+    const result = zoomTimeline(duration, visibleStart, timelineSpan, currentTime, factor, frameDurationRef.current * 8);
+    setTimelineStart(result.start);
+    setTimelineZoom(duration / result.span);
   }
 
   function cutAtTime(time: number) {
@@ -1194,19 +1321,19 @@ export function OnboardEditor() {
   function removeSelectedSegment() {
     const activeIndex = segments.findIndex((segment) => isTimeInSegments(currentTime, [segment]));
     const targetIndex = activeIndex >= 0 ? activeIndex : selectedSegmentIndex;
-    if (segments.length <= 1 || !segments[targetIndex]) return;
+    if ((!reductionMode && segments.length <= 1) || !segments[targetIndex]) return;
     recordEdit();
     const next = segments.filter((_, index) => index !== targetIndex);
-    const nextIndex = Math.min(targetIndex, next.length - 1);
+    const nextIndex = Math.max(0, Math.min(targetIndex, next.length - 1));
     setSegments(next);
     setSelectedSegmentIndex(nextIndex);
-    const nextTime = next[nextIndex].startTime;
+    const nextTime = next[nextIndex]?.startTime ?? currentTime;
     playheadHiddenAfterTrimRef.current = false;
     setPlayheadHiddenAfterTrim(false);
     setShowCutTooltip(false);
     if (videoRef.current) {
       videoRef.current.currentTime = nextTime;
-      videoRef.current.playbackRate = next[nextIndex].playbackRate;
+      videoRef.current.playbackRate = reductionMode ? 1 : next[nextIndex]?.playbackRate ?? 1;
     }
     setCurrentTime(nextTime);
   }
@@ -1226,7 +1353,7 @@ export function OnboardEditor() {
     setSegments((current) => current.map((segment, index) => (
       index === activeIndex ? { ...segment, playbackRate } : segment
     )));
-    if (videoRef.current && currentTime >= segment.startTime && currentTime < segment.endTime) {
+    if (!reductionMode && videoRef.current && currentTime >= segment.startTime && currentTime < segment.endTime) {
       videoRef.current.playbackRate = playbackRate;
     }
   }
@@ -1238,6 +1365,13 @@ export function OnboardEditor() {
 
   function seekArrowScrub(value: number, direction: -1 | 1) {
     const video = videoRef.current;
+    if (reductionMode) {
+      if (video) {
+        video.currentTime = clamp(value, 0, duration);
+        setCurrentTime(video.currentTime);
+      }
+      return;
+    }
     const firstSegment = segments[0];
     const lastSegment = segments[segments.length - 1];
     if (!video || !firstSegment || !lastSegment) return;
@@ -1344,12 +1478,12 @@ export function OnboardEditor() {
     } else if (event.key === 'Home') {
       event.preventDefault();
       videoRef.current?.pause();
-      seekVideo(segments[0]?.startTime ?? 0);
+      seekVideo(reductionMode ? 0 : segments[0]?.startTime ?? 0);
     } else if (event.key === 'End') {
       event.preventDefault();
       const lastSegment = segments[segments.length - 1];
       videoRef.current?.pause();
-      seekVideo(lastSegment ? Math.max(lastSegment.startTime, lastSegment.endTime - frameDurationRef.current) : 0);
+      seekVideo(reductionMode ? duration : lastSegment ? Math.max(lastSegment.startTime, lastSegment.endTime - frameDurationRef.current) : 0);
     }
   };
 
@@ -2354,17 +2488,41 @@ export function OnboardEditor() {
               <Scissors className="timeline-action-icon" size={16} aria-hidden="true" />
               <span className="timeline-action-label">Cut</span>
             </button>
-            <button className="timeline-tool" type="button" aria-label="Remove section" title="Remove section" onClick={removeSelectedSegment} disabled={segments.length <= 1 || !selectedSegment()}>
+            <button className="timeline-tool" type="button" aria-label="Remove section" title="Remove section" onClick={removeSelectedSegment} disabled={(!reductionMode && segments.length <= 1) || !selectedSegment()}>
               <Trash2 className="timeline-action-icon" size={16} aria-hidden="true" />
               <span className="timeline-action-label">Remove section</span>
             </button>
+            <button className={`timeline-tool${reductionMode ? ' active' : ''}`} type="button" aria-label="Reductionist mode" title="Reductionist mode" aria-pressed={reductionMode} disabled={!duration} onClick={toggleReductionMode}>
+              <ListRestart className="timeline-action-icon" size={16} aria-hidden="true" />
+              <span className="timeline-action-label">Reductionist</span>
+            </button>
           </div>
         </div>
-        <div className="timeline-ruler" aria-hidden="true">
-          {Array.from({ length: 5 }, (_, index) => {
-            const time = duration * index / 4;
-            return <span key={index} style={{ left: `${index * 25}%` }}>{formatTime(time)}</span>;
-          })}
+        <div className="timeline-navigation">
+          <button className="timeline-tool timeline-zoom" type="button" aria-label="Zoom out timeline" title="Zoom out timeline" disabled={!duration || timelineZoom <= 1} onClick={() => changeTimelineZoom(0.5)}><Minus size={16} /></button>
+          <span className="timeline-window-time">{formatTime(visibleStart)}</span>
+          <input
+            className="timeline-pan"
+            type="range"
+            aria-label="Pan timeline"
+            min={0}
+            max={Math.max(0, duration - timelineSpan)}
+            step="any"
+            value={visibleStart}
+            disabled={!duration || timelineZoom <= 1}
+            onChange={(event) => setTimelineStart(Number(event.currentTarget.value))}
+            onKeyDown={(event) => event.stopPropagation()}
+            onKeyUp={(event) => event.stopPropagation()}
+          />
+          <span className="timeline-window-time">{formatTime(visibleEnd)}</span>
+          <button className="timeline-tool timeline-zoom" type="button" aria-label="Zoom in timeline" title="Zoom in timeline" disabled={!duration || timelineSpan <= frameDurationRef.current * 8} onClick={() => changeTimelineZoom(2)}><Plus size={16} /></button>
+          {reductionMode && (
+            <div className="timeline-mark-tools">
+              <button className="timeline-tool" type="button" aria-label={`Set in point${inPoint === null ? '' : `, currently ${formatTime(inPoint)}`}`} title={inPoint === null ? 'Set in point' : `In: ${formatTime(inPoint)}`} onClick={() => setInPoint(videoRef.current?.currentTime ?? currentTime)}>In</button>
+              <button className="timeline-tool" type="button" aria-label={`Set out point${outPoint === null ? '' : `, currently ${formatTime(outPoint)}`}`} title={outPoint === null ? 'Set out point' : `Out: ${formatTime(outPoint)}`} onClick={() => setOutPoint(videoRef.current?.currentTime ?? currentTime)}>Out</button>
+              <button className="timeline-tool" type="button" aria-label="Add clip" title="Add clip" disabled={inPoint === null || outPoint === null} onClick={addMarkedClip}>Add</button>
+            </div>
+          )}
         </div>
         <div
           ref={timelineTrackRef}
@@ -2391,26 +2549,29 @@ export function OnboardEditor() {
               style={{ left: `${position}%` }}
             />
           ))}
-          {excludedRanges.map((range) => (
+          {excludedRanges.filter((range) => range.endTime > visibleStart && range.startTime < visibleEnd).map((range) => (
             <span
               key={`${range.startTime}-${range.endTime}`}
               className="timeline-excluded"
               aria-hidden="true"
               style={{
-                left: `${(range.startTime / duration) * 100}%`,
-                width: `${((range.endTime - range.startTime) / duration) * 100}%`,
+                left: `${((Math.max(range.startTime, visibleStart) - visibleStart) / timelineSpan) * 100}%`,
+                width: `${((Math.min(range.endTime, visibleEnd) - Math.max(range.startTime, visibleStart)) / timelineSpan) * 100}%`,
               }}
             />
           ))}
-          {clipBoundaryMarks.map((time) => (
+          {reductionMode && [inPoint, outPoint].map((time, index) => time !== null && time >= visibleStart && time <= visibleEnd && (
+            <span key={index} className="timeline-selection-mark" style={{ left: `${((time - visibleStart) / timelineSpan) * 100}%` }} aria-hidden="true" />
+          ))}
+          {clipBoundaryMarks.filter((time) => time >= visibleStart && time <= visibleEnd).map((time) => (
             <span
               key={`cut-${time}`}
               className="timeline-cut-mark"
               aria-hidden="true"
-              style={{ left: `${(time / duration) * 100}%` }}
+              style={{ left: `${((time - visibleStart) / timelineSpan) * 100}%` }}
             />
           ))}
-          {segments.map((segment, index) => (
+          {segments.map((segment, index) => ({ segment, index })).filter(({ segment }) => segment.endTime > visibleStart && segment.startTime < visibleEnd).map(({ segment, index }) => (
             <span
               key={`${segment.startTime}-${segment.endTime}`}
               className={
@@ -2421,8 +2582,8 @@ export function OnboardEditor() {
                     : 'timeline-segment'
               }
               style={{
-                left: `${(segment.startTime / duration) * 100}%`,
-                width: `${((segment.endTime - segment.startTime) / duration) * 100}%`,
+                left: `${((Math.max(segment.startTime, visibleStart) - visibleStart) / timelineSpan) * 100}%`,
+                width: `${((Math.min(segment.endTime, visibleEnd) - Math.max(segment.startTime, visibleStart)) / timelineSpan) * 100}%`,
               }}
               aria-current={segments.length > 1 && index === activeTimelineSegmentIndex ? 'true' : undefined}
               onClick={() => selectSegment(index)}
@@ -2431,17 +2592,17 @@ export function OnboardEditor() {
               <span className="visually-hidden">Kept section {index + 1} at {segment.playbackRate} times speed</span>
               {(segments.length === 1 || index === activeTimelineSegmentIndex) && (
                 <>
-                  <button type="button" className="timeline-trim-handle start" data-edge="startTime" data-segment-index={index} aria-label={`Trim start of section ${index + 1}`} onKeyDown={onTrimHandleKeyDown}>
+                  {segment.startTime >= visibleStart && <button type="button" className="timeline-trim-handle start" data-edge="startTime" data-segment-index={index} aria-label={`Trim start of section ${index + 1}`} onKeyDown={onTrimHandleKeyDown}>
                     <span className="timeline-trim-visual" aria-hidden="true" />
-                  </button>
-                  <button type="button" className="timeline-trim-handle end" data-edge="endTime" data-segment-index={index} aria-label={`Trim end of section ${index + 1}`} onKeyDown={onTrimHandleKeyDown}>
+                  </button>}
+                  {segment.endTime <= visibleEnd && <button type="button" className="timeline-trim-handle end" data-edge="endTime" data-segment-index={index} aria-label={`Trim end of section ${index + 1}`} onKeyDown={onTrimHandleKeyDown}>
                     <span className="timeline-trim-visual" aria-hidden="true" />
-                  </button>
+                  </button>}
                 </>
               )}
             </span>
           ))}
-          {duration > 0 && !playheadHiddenAfterTrim && (
+          {duration > 0 && !playheadHiddenAfterTrim && currentTime >= visibleStart && currentTime <= visibleEnd && (
             <span
               className="timeline-playhead"
               role="slider"
@@ -2451,17 +2612,17 @@ export function OnboardEditor() {
               aria-valuenow={currentTime}
               aria-valuetext={formatTime(currentTime)}
               tabIndex={0}
-              style={{ left: `${(currentTime / duration) * 100}%` }}
+              style={{ left: `${((currentTime - visibleStart) / timelineSpan) * 100}%` }}
             />
           )}
-          {showCutTooltip && duration > 0 && !playheadHiddenAfterTrim && (
+          {showCutTooltip && duration > 0 && !playheadHiddenAfterTrim && currentTime >= visibleStart && currentTime <= visibleEnd && (
             <button
               className="timeline-cut-tooltip"
               type="button"
               aria-label={`Cut at ${formatTime(currentTime)}`}
               title="Cut at this frame"
               disabled={!canCutAtTime(currentTime)}
-              style={{ left: `${(currentTime / duration) * 100}%` }}
+              style={{ left: `${((currentTime - visibleStart) / timelineSpan) * 100}%` }}
               onPointerDown={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
