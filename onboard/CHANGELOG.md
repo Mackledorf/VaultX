@@ -2,6 +2,14 @@
 
 This log records product and interface iterations so prior decisions can be understood and individual changes can be reviewed or restored without undoing unrelated work. For older milestones, exact dates were not recorded.
 
+## 2026-11-18
+
+### Recovered direct MP4 URL imports behind 403 and CORS failures
+
+- Added an optional direct-MP4 extension import path that downloads public HTTP(S) video files outside the editor page's CORS origin, with acknowledgement-based chunk transfer and cancellation.
+- Retained browser fetch as the first attempt and fall back to the extension only for HTTP 401/403 or cross-origin CORS failures.
+- Rationale: public MP4 URLs should not be blocked solely because the browser page cannot read their CDN response, while private or unsupported sources continue to report the source's actual failure.
+
 ## 2026-11-16
 
 ### Added GIF and WEBM source imports

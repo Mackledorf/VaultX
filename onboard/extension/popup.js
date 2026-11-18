@@ -6,9 +6,32 @@ const scanButton = document.querySelector('#scan');
 const status = document.querySelector('#status');
 const candidateList = document.querySelector('#candidates');
 const permissionButtons = {
+  direct: document.querySelector('#enable-direct'),
   x: document.querySelector('#enable-x'),
   redgifs: document.querySelector('#enable-redgifs'),
 };
+
+const directOrigins = ['<all_urls>'];
+void chrome.permissions.contains({ origins: directOrigins }).then((allowed) => {
+  if (allowed) {
+    permissionButtons.direct.textContent = 'Direct MP4 imports enabled';
+    permissionButtons.direct.disabled = true;
+  }
+});
+permissionButtons.direct.addEventListener('click', async () => {
+  try {
+    const allowed = await chrome.permissions.request({ origins: directOrigins });
+    if (allowed) {
+      permissionButtons.direct.textContent = 'Direct MP4 imports enabled';
+      permissionButtons.direct.disabled = true;
+      setStatus('Direct MP4 imports are enabled.');
+    } else {
+      setStatus('Direct MP4 imports require permission to access media hosts.', 'error');
+    }
+  } catch {
+    setStatus('Could not enable direct MP4 imports.', 'error');
+  }
+});
 
 function formatDuration(seconds) {
   const minutes = Math.floor(seconds / 60);
